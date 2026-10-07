@@ -1,0 +1,16 @@
+package __PKG__
+
+import android.content.Context
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+
+// Flutter motoru uygulama kapansa bile yaşasın diye önbellekteki motoru kullanır.
+class MainActivity : FlutterActivity() {
+    override fun provideFlutterEngine(context: Context): FlutterEngine? {
+        return EngineHolder.get(context)
+    }
+
+    override fun shouldDestroyEngineWithHost(): Boolean {
+        return false
+    }
+}

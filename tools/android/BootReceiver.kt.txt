@@ -1,0 +1,18 @@
+package __PKG__
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+
+// Telefon yeniden açıldığında alarm servisini tekrar başlatır.
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED && EngineHolder.isEnabled(context)) {
+            try {
+                KeepAliveService.start(context)
+            } catch (e: Exception) {
+                // Bazı cihazlar açılışta servis başlatmaya izin vermez; uygulama açılınca başlar.
+            }
+        }
+    }
+}
