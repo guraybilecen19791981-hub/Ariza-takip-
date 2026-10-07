@@ -1,0 +1,55 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function hasProfile() {
+      return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+    function myRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    function active() {
+      return hasProfile() && myRole() in ['bildiren', 'sef', 'teknisyen', 'admin'];
+    }
+    function isAdmin() {
+      return hasProfile() && myRole() == 'admin';
+    }
+    function isBootstrapAdmin() {
+      return request.auth.token.email.lower() == 'guraybilecen19791981@gmail.com';
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.auth.uid == uid
+        && (request.resource.data.role == 'bekliyor'
+            || (request.resource.data.role == 'admin' && isBootstrapAdmin()));
+      allow update: if isAdmin()
+        || (signedIn() && request.auth.uid == uid
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.alarm == resource.data.alarm);
+      allow delete: if isAdmin();
+    }
+
+    match /machines/{id} {
+      allow read: if active();
+      allow write: if isAdmin();
+    }
+
+    match /counters/{id} {
+      allow read, write: if active();
+    }
+
+    match /faults/{id} {
+      allow read, create, update: if active();
+      allow delete: if isAdmin();
+
+      match /photos/{photoId} {
+        allow read, create: if active();
+        allow update, delete: if isAdmin();
+      }
+    }
+  }
+}
