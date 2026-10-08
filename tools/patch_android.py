@@ -33,6 +33,18 @@ def patch_groovy(path):
         s = s.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
     s = re.sub(r"(buildTypes\s*\{\s*release\s*\{)", r"\1\n            minifyEnabled false\n            shrinkResources false", s, count=1)
     s += "\ndependencies {\n    coreLibraryDesugaring '" + DESUGAR + "'\n}\n"
+    signing = """    signingConfigs {
+        release {
+            storeFile file("../../tools/android/release.jks")
+            storePassword "arizatakip"
+            keyAlias "ariza"
+            keyPassword "arizatakip"
+        }
+    }
+
+    buildTypes {"""
+    s = s.replace("    buildTypes {", signing, 1)
+    s = s.replace("signingConfig = signingConfigs.debug", "signingConfig = signingConfigs.release")
     open(path, "w", encoding="utf-8").write(s)
 
 
@@ -48,6 +60,18 @@ def patch_kts(path):
         s = s.replace("compileOptions {", "compileOptions {\n        isCoreLibraryDesugaringEnabled = true", 1)
     s = re.sub(r"(buildTypes\s*\{\s*release\s*\{)", r"\1\n            isMinifyEnabled = false\n            isShrinkResources = false", s, count=1)
     s += '\ndependencies {\n    coreLibraryDesugaring("' + DESUGAR + '")\n}\n'
+    signing = """    signingConfigs {
+        create("release") {
+            storeFile = file("../../tools/android/release.jks")
+            storePassword = "arizatakip"
+            keyAlias = "ariza"
+            keyPassword = "arizatakip"
+        }
+    }
+
+    buildTypes {"""
+    s = s.replace("    buildTypes {", signing, 1)
+    s = s.replace('signingConfig = signingConfigs.getByName("debug")', 'signingConfig = signingConfigs.getByName("release")')
     open(path, "w", encoding="utf-8").write(s)
 
 

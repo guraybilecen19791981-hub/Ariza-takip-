@@ -15,6 +15,8 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+part 'pack.dart';
+
 // ---------------------------------------------------------------------------
 // Ayarlar
 // ---------------------------------------------------------------------------
@@ -43,6 +45,9 @@ const Map<String, String> kRoleLabels = {
   'sef': 'Teknik Müdür',
   'teknisyen': 'Teknisyen',
   'admin': 'Admin',
+  'paketci': 'Paketleme sorumlusu',
+  'kalite': 'Kalite',
+  'vardiya': 'Vardiya amiri',
 };
 
 const Map<String, String> kStatusLabels = {
@@ -153,6 +158,7 @@ class AppUser {
   }
 
   bool get getsAlarm => role == 'sef' || alarm;
+  bool get getsPackAlerts => role == 'kalite' || role == 'vardiya' || role == 'admin';
   bool get canManage => role == 'sef' || role == 'admin';
   String get roleLabel => kRoleLabels[role] ?? role;
 }
@@ -267,8 +273,8 @@ class Notifier {
     await notif.initialize(settings, onDidReceiveNotificationResponse: (NotificationResponse r) {
       final id = r.payload;
       if (id != null && id.isNotEmpty) {
-        cancel(id);
-        openFault(id);
+        if (!id.startsWith('pack:')) cancel(id);
+        openPayload(id);
       }
     });
     try {
@@ -328,6 +334,19 @@ class Notifier {
     await notif.show(idFor(faultId) ^ 0x1000, title, body, const NotificationDetails(android: details), payload: faultId);
   }
 
+  static Future<void> packAlert(String orderId, String title, String body) async {
+    const details = AndroidNotificationDetails(
+      'paket_uyari_v1',
+      'Paketleme uyarıları',
+      channelDescription: 'Ürün yok / kalite onayı bekleniyor duruşları',
+      importance: Importance.max,
+      priority: Priority.max,
+      enableVibration: true,
+    );
+    await notif.show(DateTime.now().millisecondsSinceEpoch & 0x3fffffff, title, body,
+        const NotificationDetails(android: details), payload: 'pack:$orderId');
+  }
+
   static Future<void> cancel(String faultId) async {
     try {
       await notif.cancel(idFor(faultId));
@@ -335,12 +354,31 @@ class Notifier {
   }
 }
 
-void openFault(String id) {
+void openFault(String id) => openPayload(id);
+
+void openPayload(String payload) {
   if (currentUser == null) {
-    pendingFaultId = id;
+    pendingFaultId = payload;
     return;
   }
-  navKey.currentState?.push(MaterialPageRoute(builder: (_) => FaultDetailPage(faultId: id)));
+  if (payload.startsWith('pack:')) {
+    final id = payload.substring(5);
+    navKey.currentState?.push(MaterialPageRoute(builder: (_) => PackDetailPage(orderId: id)));
+  } else {
+    navKey.currentState?.push(MaterialPageRoute(builder: (_) => FaultDetailPage(faultId: payload)));
+  }
+}
+
+List<Widget> commonActions(AppUser me) {
+  return [
+    if (me.getsAlarm || me.getsPackAlerts)
+      IconButton(
+        tooltip: 'Bildirimler için pil ayarı',
+        icon: const Icon(Icons.battery_alert),
+        onPressed: () => keepAlive.invokeMethod('batterySettings').catchError((_) => null),
+      ),
+    IconButton(onPressed: signOut, icon: const Icon(Icons.logout), tooltip: 'Çıkış'),
+  ];
 }
 
 final Set<String> _alarmPagesOpen = <String>{};
@@ -354,6 +392,7 @@ void showAlarmPage(String id) {
 class Watchers {
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _alarmSub;
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _assignSub;
+  static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _packSub;
   static String _key = '';
   static final Set<String> _seen = <String>{};
 
@@ -394,8 +433,24 @@ class Watchers {
       }, onError: (_) {});
     }
 
+    if (u.getsPackAlerts) {
+      final since = Timestamp.fromDate(DateTime.now().subtract(const Duration(seconds: 10)));
+      _packSub = db.collection('packAlerts').where('createdAt', isGreaterThan: since).snapshots().listen((s) {
+        for (final c in s.docChanges) {
+          if (c.type != DocumentChangeType.added) continue;
+          final m = c.doc.data() ?? <String, dynamic>{};
+          if (!_seen.add('alert:${c.doc.id}')) continue;
+          Notifier.packAlert(
+            (m['orderId'] ?? '').toString(),
+            'Paketleme durdu: ${m['reasonLabel'] ?? ''}',
+            'Sipariş ${m['orderNo'] ?? ''} · ${m['productCode'] ?? ''} · ${m['by'] ?? ''}',
+          );
+        }
+      }, onError: (_) {});
+    }
+
     try {
-      if (u.role == 'bildiren' && !u.alarm) {
+      if ((u.role == 'bildiren' || u.role == 'paketci') && !u.alarm) {
         await keepAlive.invokeMethod('stop');
       } else {
         await keepAlive.invokeMethod('start');
@@ -406,6 +461,8 @@ class Watchers {
   static Future<void> stop() async {
     await _alarmSub?.cancel();
     await _assignSub?.cancel();
+    await _packSub?.cancel();
+    _packSub = null;
     _alarmSub = null;
     _assignSub = null;
     _key = '';
@@ -743,14 +800,32 @@ class _HomePageState extends State<HomePage> {
       final p = pendingFaultId;
       if (p != null) {
         pendingFaultId = null;
-        openFault(p);
+        openPayload(p);
       }
     });
   }
 
+  int _module = 0;
+
   @override
   Widget build(BuildContext context) {
     final me = widget.me;
+    if (me.role == 'paketci') return PackHome(me: me, monitor: false);
+    if (me.role == 'kalite' || me.role == 'vardiya') return PackHome(me: me, monitor: true);
+    if (me.role != 'admin') return _arizaScaffold(context, me, null);
+    final nav = NavigationBar(
+      selectedIndex: _module,
+      onDestinationSelected: (i) => setState(() => _module = i),
+      destinations: const [
+        NavigationDestination(icon: Icon(Icons.build_circle_outlined), label: 'Arıza'),
+        NavigationDestination(icon: Icon(Icons.inventory_2_outlined), label: 'Paketleme'),
+      ],
+    );
+    if (_module == 1) return PackHome(me: me, monitor: true, nav: nav);
+    return _arizaScaffold(context, me, nav);
+  }
+
+  Widget _arizaScaffold(BuildContext context, AppUser me, Widget? nav) {
     final List<Tab> tabs;
     final List<Widget> views;
     switch (me.role) {
@@ -796,13 +871,7 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
           actions: [
-            if (me.getsAlarm)
-              IconButton(
-                tooltip: 'Alarm için pil ayarı',
-                icon: const Icon(Icons.battery_alert),
-                onPressed: () => keepAlive.invokeMethod('batterySettings').catchError((_) => null),
-              ),
-            IconButton(onPressed: signOut, icon: const Icon(Icons.logout), tooltip: 'Çıkış'),
+            ...commonActions(me),
           ],
           bottom: tabs.length > 1
               ? TabBar(
@@ -821,6 +890,7 @@ class _HomePageState extends State<HomePage> {
           icon: const Icon(Icons.add),
           label: const Text('Arıza Bildir'),
         ),
+        bottomNavigationBar: nav,
         body: TabBarView(children: views),
       ),
     );
@@ -1886,3 +1956,5 @@ class MachinesView extends StatelessWidget {
     );
   }
 }
+
+// Paketleme modülü: lib/pack.dart
