@@ -48,7 +48,46 @@ const Map<String, String> kRoleLabels = {
   'paketci': 'Paketleme sorumlusu',
   'kalite': 'Kalite',
   'vardiya': 'Vardiya amiri',
+  'ihracat': 'İhracat',
+  'planlama': 'Planlama',
+  'depo': 'Depo / palet sorumlusu',
+  'izleyen': 'İzleyen',
 };
+
+// Panel yetkileri: yok < gor < gir < yonet
+const List<String> kPermLevels = ['yok', 'gor', 'gir', 'yonet'];
+const Map<String, String> kPermLabels = {'yok': 'Yok', 'gor': 'Görür', 'gir': 'Girer / düzenler', 'yonet': 'Yönetir / onaylar'};
+const Map<String, String> kModules = {'ariza': 'Arıza', 'paketleme': 'Paketleme', 'rapor': 'Raporlar / Excel'};
+
+Map<String, String> defaultPerms(String role) {
+  switch (role) {
+    case 'admin':
+      return {'ariza': 'yonet', 'paketleme': 'yonet', 'rapor': 'yonet'};
+    case 'sef':
+      return {'ariza': 'yonet', 'paketleme': 'gor', 'rapor': 'gor'};
+    case 'teknisyen':
+    case 'bildiren':
+      return {'ariza': 'gir', 'paketleme': 'yok', 'rapor': 'yok'};
+    case 'paketci':
+      return {'ariza': 'gir', 'paketleme': 'gir', 'rapor': 'yok'};
+    case 'vardiya':
+      return {'ariza': 'gir', 'paketleme': 'yonet', 'rapor': 'gor'};
+    case 'kalite':
+    case 'ihracat':
+    case 'planlama':
+      return {'ariza': 'gor', 'paketleme': 'gor', 'rapor': 'gor'};
+    case 'depo':
+      return {'ariza': 'gir', 'paketleme': 'gor', 'rapor': 'yok'};
+    case 'izleyen':
+      return {'ariza': 'gor', 'paketleme': 'gor', 'rapor': 'gor'};
+  }
+  return {'ariza': 'yok', 'paketleme': 'yok', 'rapor': 'yok'};
+}
+
+int permRank(String? p) {
+  final i = kPermLevels.indexOf(p ?? 'yok');
+  return i < 0 ? 0 : i;
+}
 
 const Map<String, String> kStatusLabels = {
   'acik': 'Açık',
@@ -143,23 +182,35 @@ class AppUser {
   final String email;
   final String role;
   final bool alarm;
+  final Map<String, String> perms;
 
-  AppUser({required this.uid, required this.name, required this.email, required this.role, required this.alarm});
+  AppUser({required this.uid, required this.name, required this.email, required this.role, required this.alarm, required this.perms});
 
   factory AppUser.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
     final m = d.data() ?? <String, dynamic>{};
+    final role = (m['role'] ?? 'bekliyor').toString();
+    final perms = Map<String, String>.from(defaultPerms(role));
+    final raw = m['perms'];
+    if (raw is Map) {
+      raw.forEach((k, v) => perms[k.toString()] = v.toString());
+    }
+    if (role == 'admin') perms.updateAll((k, v) => 'yonet');
     return AppUser(
       uid: d.id,
       name: (m['name'] ?? '').toString(),
       email: (m['email'] ?? '').toString(),
-      role: (m['role'] ?? 'bekliyor').toString(),
+      role: role,
       alarm: m['alarm'] == true,
+      perms: perms,
     );
   }
 
+  String perm(String module) => perms[module] ?? 'yok';
+  bool can(String module, String level) => permRank(perm(module)) >= permRank(level);
+  bool get isAdmin => role == 'admin';
   bool get getsAlarm => role == 'sef' || alarm;
-  bool get getsPackAlerts => role == 'kalite' || role == 'vardiya' || role == 'admin';
-  bool get canManage => role == 'sef' || role == 'admin';
+  bool get getsPackAlerts => role == 'kalite' || role == 'vardiya' || role == 'admin' || role == 'ihracat' || role == 'planlama';
+  bool get canManage => role == 'sef' || role == 'admin' || can('ariza', 'yonet');
   String get roleLabel => kRoleLabels[role] ?? role;
 }
 
@@ -440,11 +491,23 @@ class Watchers {
           if (c.type != DocumentChangeType.added) continue;
           final m = c.doc.data() ?? <String, dynamic>{};
           if (!_seen.add('alert:${c.doc.id}')) continue;
-          Notifier.packAlert(
-            (m['orderId'] ?? '').toString(),
-            'Paketleme durdu: ${m['reasonLabel'] ?? ''}',
-            'Sipariş ${m['orderNo'] ?? ''} · ${m['productCode'] ?? ''} · ${m['by'] ?? ''}',
-          );
+          final type = (m['type'] ?? 'durus').toString();
+          if (type == 'onay') {
+            final targets = (m['targetRoles'] is List) ? (m['targetRoles'] as List).map((e) => e.toString()).toList() : <String>[];
+            if (!targets.contains(u.role) && !u.isAdmin) continue;
+            Notifier.packAlert(
+              (m['orderId'] ?? '').toString(),
+              'Görsel onayı bekleniyor',
+              'Sipariş ${m['orderNo'] ?? ''} · ${m['productCode'] ?? ''} · ${m['by'] ?? ''}',
+            );
+          } else {
+            if (!(u.role == 'kalite' || u.role == 'vardiya' || u.isAdmin)) continue;
+            Notifier.packAlert(
+              (m['orderId'] ?? '').toString(),
+              'Paketleme durdu: ${m['reasonLabel'] ?? ''}',
+              'Sipariş ${m['orderNo'] ?? ''} · ${m['productCode'] ?? ''} · ${m['by'] ?? ''}',
+            );
+          }
         }
       }, onError: (_) {});
     }
@@ -491,7 +554,7 @@ class ArizaApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       navigatorKey: navKey,
-      title: 'Arıza Takip',
+      title: 'Bind Takip',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
@@ -550,6 +613,7 @@ Map<String, dynamic> newUserData(String email, String name) {
     'email': e,
     'role': isAdmin ? 'admin' : 'bekliyor',
     'alarm': isAdmin,
+    'perms': defaultPerms(isAdmin ? 'admin' : 'bekliyor'),
     'createdAt': FieldValue.serverTimestamp(),
   };
 }
@@ -636,7 +700,7 @@ class _LoginPageState extends State<LoginPage> {
               ),
             ),
             const SizedBox(height: 16),
-            const Center(child: Text('Arıza Takip', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w700))),
+            const Center(child: Text('Bind Takip', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w700))),
             const SizedBox(height: 32),
             if (_register) ...[
               TextField(controller: _name, decoration: const InputDecoration(labelText: 'Adınız Soyadınız')),
@@ -741,7 +805,7 @@ class SimpleMessagePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Arıza Takip'), actions: [
+      appBar: AppBar(title: const Text('Bind Takip'), actions: [
         IconButton(onPressed: signOut, icon: const Icon(Icons.logout), tooltip: 'Çıkış'),
       ]),
       body: Padding(
@@ -810,25 +874,53 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final me = widget.me;
-    if (me.role == 'paketci') return PackHome(me: me, monitor: false);
-    if (me.role == 'kalite' || me.role == 'vardiya') return PackHome(me: me, monitor: true);
-    if (me.role != 'admin') return _arizaScaffold(context, me, null);
-    final nav = NavigationBar(
-      selectedIndex: _module,
-      onDestinationSelected: (i) => setState(() => _module = i),
-      destinations: const [
-        NavigationDestination(icon: Icon(Icons.build_circle_outlined), label: 'Arıza'),
-        NavigationDestination(icon: Icon(Icons.inventory_2_outlined), label: 'Paketleme'),
-      ],
-    );
-    if (_module == 1) return PackHome(me: me, monitor: true, nav: nav);
+    final modules = <String>[];
+    final packFirst = me.role == 'paketci' || me.role == 'kalite' || me.role == 'ihracat' || me.role == 'vardiya' || me.role == 'planlama';
+    if (packFirst && me.can('paketleme', 'gor')) modules.add('paketleme');
+    if (me.can('ariza', 'gor')) modules.add('ariza');
+    if (!packFirst && me.can('paketleme', 'gor')) modules.add('paketleme');
+    if (modules.isEmpty) {
+      return const SimpleMessagePage(
+        title: 'Panel yetkiniz yok',
+        text: 'Admin size bir panel yetkisi verdiğinde ekranlar açılacak.',
+      );
+    }
+    if (_module >= modules.length) _module = 0;
+    Widget? nav;
+    if (modules.length > 1) {
+      nav = NavigationBar(
+        selectedIndex: _module,
+        onDestinationSelected: (i) => setState(() => _module = i),
+        destinations: [
+          for (final m in modules)
+            NavigationDestination(
+              icon: Icon(m == 'ariza' ? Icons.build_circle_outlined : Icons.inventory_2_outlined),
+              label: m == 'ariza' ? 'Arıza' : 'Paketleme',
+            ),
+        ],
+      );
+    }
+    final current = modules[_module];
+    if (current == 'paketleme') return PackHome(me: me, nav: nav);
     return _arizaScaffold(context, me, nav);
   }
 
   Widget _arizaScaffold(BuildContext context, AppUser me, Widget? nav) {
     final List<Tab> tabs;
     final List<Widget> views;
-    switch (me.role) {
+    final String mode = me.isAdmin
+        ? 'admin'
+        : (me.role == 'teknisyen'
+            ? 'teknisyen'
+            : (me.can('ariza', 'yonet') ? 'sef' : (me.can('ariza', 'gir') ? 'bildiren' : 'izle')));
+    switch (mode) {
+      case 'izle':
+        tabs = const [Tab(text: 'Açık'), Tab(text: 'Arşiv')];
+        views = [
+          FaultList(filter: (f) => !f.isClosed, sortOpen: true, empty: 'Açık arıza yok.'),
+          FaultList(filter: (f) => f.isClosed, empty: 'Arşiv boş.'),
+        ];
+        break;
       case 'sef':
         tabs = const [Tab(text: 'Açık'), Tab(text: 'Arşiv')];
         views = [
@@ -866,7 +958,7 @@ class _HomePageState extends State<HomePage> {
           title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Arıza Takip', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              const Text('Bind · Arıza', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
               Text('${me.name} · ${me.roleLabel}', style: const TextStyle(fontSize: 12, color: Color(0xFFADB5BD))),
             ],
           ),
@@ -883,13 +975,15 @@ class _HomePageState extends State<HomePage> {
                 )
               : null,
         ),
-        floatingActionButton: FloatingActionButton.extended(
-          backgroundColor: kOrange,
-          foregroundColor: Colors.white,
-          onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => NewFaultPage(me: me))),
-          icon: const Icon(Icons.add),
-          label: const Text('Arıza Bildir'),
-        ),
+        floatingActionButton: me.can('ariza', 'gir')
+            ? FloatingActionButton.extended(
+                backgroundColor: kOrange,
+                foregroundColor: Colors.white,
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => NewFaultPage(me: me))),
+                icon: const Icon(Icons.add),
+                label: const Text('Arıza Bildir'),
+              )
+            : null,
         bottomNavigationBar: nav,
         body: TabBarView(children: views),
       ),
@@ -1777,7 +1871,7 @@ Future<void> exportExcel() async {
     final now = DateTime.now();
     final file = File('${dir.path}/ariza_takip_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}.xlsx');
     await file.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(file.path)], text: 'Arıza Takip kayıtları');
+    await Share.shareXFiles([XFile(file.path)], text: 'Bind Takip arıza kayıtları');
   } catch (e) {
     toast('Excel hatası: $e');
   }
@@ -1818,9 +1912,17 @@ class UsersView extends StatelessWidget {
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
           children: [
+            FilledButton.icon(
+              style: FilledButton.styleFrom(backgroundColor: kDark),
+              onPressed: () => showCreateUserDialog(context),
+              icon: const Icon(Icons.person_add),
+              label: const Text('Yeni kullanıcı ekle'),
+            ),
+            const SizedBox(height: 10),
             const Text(
-              'Yeni kullanıcılar telefonlarında uygulamayı açıp "Yeni hesap oluştur" ile kayıt olur. '
-              'Burada onlara rol verin. Alarm anahtarı açık olanların telefonunda yeni arızada alarm çalar.',
+              'Kullanıcıyı buradan ekleyebilir ya da kişi telefondan "Yeni hesap oluştur" ile kayıt olabilir. '
+              'Rol seçince panel yetkileri otomatik dolar; isterseniz her paneli ayrıca değiştirin. '
+              'Alarm açık olanların telefonunda yeni arızada alarm çalar.',
               style: TextStyle(color: kMuted),
             ),
             const SizedBox(height: 12),
@@ -1860,7 +1962,7 @@ class UsersView extends StatelessWidget {
                                 toast('Kendi admin rolünüzü kaldıramazsınız.');
                                 return;
                               }
-                              db.collection('users').doc(u.uid).update({'role': v});
+                              db.collection('users').doc(u.uid).update({'role': v, 'perms': defaultPerms(v)});
                             },
                           ),
                         ),
@@ -1876,6 +1978,35 @@ class UsersView extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (u.role != 'admin' && u.role != 'bekliyor') ...[
+                      const SizedBox(height: 10),
+                      const Text('Panel yetkileri', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final mod in kModules.entries)
+                            SizedBox(
+                              width: 170,
+                              child: DropdownButtonFormField<String>(
+                                value: u.perm(mod.key),
+                                isExpanded: true,
+                                decoration: InputDecoration(labelText: mod.value, isDense: true),
+                                items: kPermLevels
+                                    .map((l) => DropdownMenuItem<String>(value: l, child: Text(kPermLabels[l] ?? l, overflow: TextOverflow.ellipsis)))
+                                    .toList(),
+                                onChanged: (v) {
+                                  if (v == null) return;
+                                  final np = Map<String, String>.from(u.perms);
+                                  np[mod.key] = v;
+                                  db.collection('users').doc(u.uid).update({'perms': np});
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
                   ],
                 )),
               ),
@@ -1958,3 +2089,90 @@ class MachinesView extends StatelessWidget {
 }
 
 // Paketleme modülü: lib/pack.dart
+
+
+Future<void> createUserByAdmin(String name, String email, String pass, String role) async {
+  FirebaseApp app2;
+  try {
+    app2 = Firebase.app('creator');
+  } catch (_) {
+    app2 = await Firebase.initializeApp(name: 'creator', options: kFirebaseOptions);
+  }
+  final auth2 = FirebaseAuth.instanceFor(app: app2);
+  final cred = await auth2.createUserWithEmailAndPassword(email: email.trim(), password: pass);
+  final uid = cred.user!.uid;
+  await auth2.signOut();
+  await db.collection('users').doc(uid).set({
+    'name': name.trim(),
+    'email': email.trim().toLowerCase(),
+    'role': role,
+    'alarm': false,
+    'perms': defaultPerms(role),
+    'createdAt': FieldValue.serverTimestamp(),
+  });
+}
+
+Future<void> showCreateUserDialog(BuildContext context) async {
+  final name = TextEditingController();
+  final email = TextEditingController();
+  final pass = TextEditingController();
+  String role = 'izleyen';
+  bool busy = false;
+  await showDialog<void>(
+    context: context,
+    builder: (d) => StatefulBuilder(
+      builder: (d, setS) => AlertDialog(
+        title: const Text('Yeni kullanıcı'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: name, decoration: const InputDecoration(labelText: 'Ad soyad')),
+              const SizedBox(height: 10),
+              TextField(controller: email, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'E-posta')),
+              const SizedBox(height: 10),
+              TextField(controller: pass, decoration: const InputDecoration(labelText: 'Geçici şifre (en az 6 karakter)')),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                value: role,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Rol'),
+                items: kRoleLabels.entries
+                    .where((e) => e.key != 'bekliyor')
+                    .map((e) => DropdownMenuItem<String>(value: e.key, child: Text(e.value)))
+                    .toList(),
+                onChanged: (v) => setS(() => role = v ?? role),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: busy ? null : () => Navigator.pop(d), child: const Text('Vazgeç')),
+          FilledButton(
+            onPressed: busy
+                ? null
+                : () async {
+                    if (name.text.trim().isEmpty || email.text.trim().isEmpty || pass.text.length < 6) {
+                      toast('Ad, e-posta ve en az 6 karakterli şifre gerekli.');
+                      return;
+                    }
+                    setS(() => busy = true);
+                    try {
+                      await createUserByAdmin(name.text, email.text, pass.text, role);
+                      if (d.mounted) Navigator.pop(d);
+                      toast('${name.text.trim()} eklendi. Bu e-posta ve şifreyle giriş yapabilir.');
+                    } on FirebaseAuthException catch (e) {
+                      toast(e.code == 'email-already-in-use' ? 'Bu e-posta zaten kayıtlı.' : 'Hata: ${e.message ?? e.code}');
+                      setS(() => busy = false);
+                    } catch (e) {
+                      toast('Hata: $e');
+                      setS(() => busy = false);
+                    }
+                  },
+            child: Text(busy ? 'Ekleniyor…' : 'Ekle'),
+          ),
+        ],
+      ),
+    ),
+  );
+}

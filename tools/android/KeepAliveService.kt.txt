@@ -49,7 +49,7 @@ class KeepAliveService : Service() {
     private fun buildNotification(): Notification {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "Arıza Takip servisi", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(CHANNEL_ID, "Bind Takip servisi", NotificationManager.IMPORTANCE_LOW)
             channel.setShowBadge(false)
             manager.createNotificationChannel(channel)
         }
@@ -67,7 +67,7 @@ class KeepAliveService : Service() {
             Notification.Builder(this)
         }
         return builder
-            .setContentTitle("Arıza Takip çalışıyor")
+            .setContentTitle("Bind Takip çalışıyor")
             .setContentText("Yeni arızalar dinleniyor")
             .setSmallIcon(applicationInfo.icon)
             .setContentIntent(pending)
