@@ -16,6 +16,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 part 'pack.dart';
+part 'pallet.dart';
 
 // ---------------------------------------------------------------------------
 // Ayarlar
@@ -57,31 +58,31 @@ const Map<String, String> kRoleLabels = {
 // Panel yetkileri: yok < gor < gir < yonet
 const List<String> kPermLevels = ['yok', 'gor', 'gir', 'yonet'];
 const Map<String, String> kPermLabels = {'yok': 'Yok', 'gor': 'Görür', 'gir': 'Girer / düzenler', 'yonet': 'Yönetir / onaylar'};
-const Map<String, String> kModules = {'ariza': 'Arıza', 'paketleme': 'Paketleme', 'rapor': 'Raporlar / Excel'};
+const Map<String, String> kModules = {'ariza': 'Arıza', 'paketleme': 'Paketleme', 'paletleme': 'Paletleme', 'rapor': 'Raporlar / Excel'};
 
 Map<String, String> defaultPerms(String role) {
+  Map<String, String> p(String a, String pk, String pl, String r) => {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'rapor': r};
   switch (role) {
     case 'admin':
-      return {'ariza': 'yonet', 'paketleme': 'yonet', 'rapor': 'yonet'};
+      return p('yonet', 'yonet', 'yonet', 'yonet');
     case 'sef':
-      return {'ariza': 'yonet', 'paketleme': 'gor', 'rapor': 'gor'};
+      return p('yonet', 'gor', 'yok', 'gor');
     case 'teknisyen':
     case 'bildiren':
-      return {'ariza': 'gir', 'paketleme': 'yok', 'rapor': 'yok'};
+      return p('gir', 'yok', 'yok', 'yok');
     case 'paketci':
-      return {'ariza': 'gir', 'paketleme': 'gir', 'rapor': 'yok'};
+      return p('gir', 'gir', 'gor', 'yok');
     case 'vardiya':
-      return {'ariza': 'gir', 'paketleme': 'yonet', 'rapor': 'gor'};
+      return p('gir', 'yonet', 'gor', 'gor');
     case 'kalite':
     case 'ihracat':
     case 'planlama':
-      return {'ariza': 'gor', 'paketleme': 'gor', 'rapor': 'gor'};
-    case 'depo':
-      return {'ariza': 'gir', 'paketleme': 'gor', 'rapor': 'yok'};
     case 'izleyen':
-      return {'ariza': 'gor', 'paketleme': 'gor', 'rapor': 'gor'};
+      return p('gor', 'gor', 'gor', 'gor');
+    case 'depo':
+      return p('gir', 'gor', 'gir', 'yok');
   }
-  return {'ariza': 'yok', 'paketleme': 'yok', 'rapor': 'yok'};
+  return p('yok', 'yok', 'yok', 'yok');
 }
 
 int permRank(String? p) {
@@ -879,6 +880,11 @@ class _HomePageState extends State<HomePage> {
     if (packFirst && me.can('paketleme', 'gor')) modules.add('paketleme');
     if (me.can('ariza', 'gor')) modules.add('ariza');
     if (!packFirst && me.can('paketleme', 'gor')) modules.add('paketleme');
+    if (me.role == 'depo' && me.can('paletleme', 'gor')) {
+      modules.insert(0, 'paletleme');
+    } else if (me.can('paletleme', 'gor')) {
+      modules.add('paletleme');
+    }
     if (modules.isEmpty) {
       return const SimpleMessagePage(
         title: 'Panel yetkiniz yok',
@@ -894,14 +900,15 @@ class _HomePageState extends State<HomePage> {
         destinations: [
           for (final m in modules)
             NavigationDestination(
-              icon: Icon(m == 'ariza' ? Icons.build_circle_outlined : Icons.inventory_2_outlined),
-              label: m == 'ariza' ? 'Arıza' : 'Paketleme',
+              icon: Icon(m == 'ariza' ? Icons.build_circle_outlined : (m == 'paketleme' ? Icons.inventory_2_outlined : Icons.layers_outlined)),
+              label: m == 'ariza' ? 'Arıza' : (m == 'paketleme' ? 'Paketleme' : 'Paletleme'),
             ),
         ],
       );
     }
     final current = modules[_module];
     if (current == 'paketleme') return PackHome(me: me, nav: nav);
+    if (current == 'paletleme') return PalletHome(me: me, nav: nav);
     return _arizaScaffold(context, me, nav);
   }
 
