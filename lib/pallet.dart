@@ -12,16 +12,24 @@ class PLine {
   String productCode;
   int boxes;
   int perBox;
-  PLine({required this.productCode, required this.boxes, required this.perBox});
+  String lot;
+  String skt;
+  PLine({required this.productCode, required this.boxes, required this.perBox, this.lot = '', this.skt = ''});
 
   factory PLine.fromMap(dynamic m) {
     final x = (m is Map) ? m : <String, dynamic>{};
-    return PLine(productCode: (x['productCode'] ?? '').toString(), boxes: _toInt(x['boxes']), perBox: _toInt(x['perBox']));
+    return PLine(
+      productCode: (x['productCode'] ?? '').toString(),
+      boxes: _toInt(x['boxes']),
+      perBox: _toInt(x['perBox']),
+      lot: (x['lot'] ?? '').toString(),
+      skt: (x['skt'] ?? '').toString(),
+    );
   }
 
-  Map<String, dynamic> toMap() => {'productCode': productCode, 'boxes': boxes, 'perBox': perBox};
+  Map<String, dynamic> toMap() => {'productCode': productCode, 'boxes': boxes, 'perBox': perBox, 'lot': lot, 'skt': skt};
   int get units => boxes * perBox;
-  PLine copy() => PLine(productCode: productCode, boxes: boxes, perBox: perBox);
+  PLine copy() => PLine(productCode: productCode, boxes: boxes, perBox: perBox, lot: lot, skt: skt);
 }
 
 List<PLine> _lines(dynamic v) => v is List ? v.map((e) => PLine.fromMap(e)).toList() : <PLine>[];
@@ -384,11 +392,21 @@ class _LineCtrls {
   final TextEditingController code;
   final TextEditingController boxes;
   final TextEditingController perBox;
+  final TextEditingController lot;
+  final TextEditingController skt;
   _LineCtrls(PLine l)
       : code = TextEditingController(text: l.productCode),
         boxes = TextEditingController(text: l.boxes > 0 ? '${l.boxes}' : ''),
-        perBox = TextEditingController(text: l.perBox > 0 ? '${l.perBox}' : '');
-  PLine toLine() => PLine(productCode: code.text.trim(), boxes: int.tryParse(boxes.text.trim()) ?? 0, perBox: int.tryParse(perBox.text.trim()) ?? 0);
+        perBox = TextEditingController(text: l.perBox > 0 ? '${l.perBox}' : ''),
+        lot = TextEditingController(text: l.lot),
+        skt = TextEditingController(text: l.skt);
+  PLine toLine() => PLine(
+        productCode: code.text.trim(),
+        boxes: int.tryParse(boxes.text.trim()) ?? 0,
+        perBox: int.tryParse(perBox.text.trim()) ?? 0,
+        lot: lot.text.trim(),
+        skt: skt.text.trim(),
+      );
 }
 
 class PalletOrderFormPage extends StatefulWidget {
@@ -623,19 +641,36 @@ class _PalletFormPageState extends State<PalletFormPage> {
               child: Text('Siparişteki ürünler: ${codes.join(', ')}', style: const TextStyle(color: kMuted, fontSize: 13)),
             ),
           for (var i = 0; i < _items.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(children: [
-                Expanded(flex: 3, child: TextField(controller: _items[i].code, decoration: const InputDecoration(labelText: 'Ürün kodu', isDense: true))),
-                const SizedBox(width: 6),
-                Expanded(flex: 2, child: TextField(controller: _items[i].boxes, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Koli', isDense: true))),
-                const SizedBox(width: 6),
-                Expanded(flex: 2, child: TextField(controller: _items[i].perBox, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Koli içi', isDense: true))),
-                IconButton(
-                  tooltip: 'Satırı sil',
-                  icon: const Icon(Icons.close),
-                  onPressed: _items.length > 1 ? () => setState(() => _items.removeAt(i)) : null,
-                ),
+            Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.fromLTRB(10, 10, 0, 6),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFFE3E6EA))),
+              child: Column(children: [
+                Row(children: [
+                  Expanded(flex: 3, child: TextField(controller: _items[i].code, decoration: const InputDecoration(labelText: 'Ürün kodu', isDense: true))),
+                  const SizedBox(width: 6),
+                  Expanded(flex: 2, child: TextField(controller: _items[i].boxes, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Koli', isDense: true))),
+                  const SizedBox(width: 6),
+                  Expanded(flex: 2, child: TextField(controller: _items[i].perBox, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Koli içi', isDense: true))),
+                  IconButton(
+                    tooltip: 'Satırı sil',
+                    icon: const Icon(Icons.close),
+                    onPressed: _items.length > 1 ? () => setState(() => _items.removeAt(i)) : null,
+                  ),
+                ]),
+                const SizedBox(height: 6),
+                Row(children: [
+                  Expanded(child: TextField(controller: _items[i].lot, decoration: const InputDecoration(labelText: 'Lot no', isDense: true))),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: TextField(
+                      controller: _items[i].skt,
+                      keyboardType: TextInputType.datetime,
+                      decoration: const InputDecoration(labelText: 'SKT', hintText: 'GG.AA.YYYY', isDense: true),
+                    ),
+                  ),
+                  const SizedBox(width: 48),
+                ]),
               ]),
             ),
           OutlinedButton.icon(onPressed: _addItem, icon: const Icon(Icons.add_box), label: const Text('Yeni koli / ürün ekle')),
@@ -798,7 +833,8 @@ class PalletDetailPage extends StatelessWidget {
                             ]),
                             Text('Brüt ${fmtKg(p.gross)} kg · Net ${fmtKg(p.net)} kg · ${p.boxes} koli', style: const TextStyle(color: kMuted, fontSize: 13)),
                             for (final it in p.items)
-                              Text('• ${it.productCode}: ${it.boxes} koli${it.perBox > 0 ? ' × ${it.perBox} = ${it.units} adet' : ''}'),
+                              Text('• ${it.productCode}: ${it.boxes} koli${it.perBox > 0 ? ' × ${it.perBox} = ${it.units} adet' : ''}'
+                                  '${it.lot.isNotEmpty ? ' · Lot ${it.lot}' : ''}${it.skt.isNotEmpty ? ' · SKT ${it.skt}' : ''}'),
                           ])),
                         ),
                       ),
@@ -932,7 +968,7 @@ Future<void> exportPackingList(PalletOrder o) async {
     sh.appendRow(<xl.CellValue?>[t('Tarih'), t(fmtFull(DateTime.now()))]);
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
-      t('Palet no'), t('Palet ebatı (cm)'), t('Ürün kodu'), t('Koli'), t('Koli içi adet'), t('Toplam adet'), t('Brüt kg'), t('Net kg'),
+      t('Palet no'), t('Palet ebatı (cm)'), t('Ürün kodu'), t('Lot no'), t('SKT'), t('Koli'), t('Koli içi adet'), t('Toplam adet'), t('Brüt kg'), t('Net kg'),
     ]);
     int tb = 0, tu = 0;
     double tg = 0, tn = 0;
@@ -940,7 +976,7 @@ Future<void> exportPackingList(PalletOrder o) async {
       for (var i = 0; i < p.items.length; i++) {
         final it = p.items[i];
         sh.appendRow(<xl.CellValue?>[
-          n(p.no), t(i == 0 ? p.size : ''), t(it.productCode), n(it.boxes), n(it.perBox), n(it.units),
+          n(p.no), t(i == 0 ? p.size : ''), t(it.productCode), t(it.lot), t(it.skt), n(it.boxes), n(it.perBox), n(it.units),
           i == 0 ? dbl(p.gross) : null, i == 0 ? dbl(p.net) : null,
         ]);
       }
@@ -950,7 +986,7 @@ Future<void> exportPackingList(PalletOrder o) async {
       tn += p.net;
     }
     sh.appendRow(<xl.CellValue?>[]);
-    sh.appendRow(<xl.CellValue?>[t('TOPLAM'), t('${pallets.length} palet'), null, n(tb), null, n(tu), dbl(tg), dbl(tn)]);
+    sh.appendRow(<xl.CellValue?>[t('TOPLAM'), t('${pallets.length} palet'), null, null, null, n(tb), null, n(tu), dbl(tg), dbl(tn)]);
 
     sum.appendRow(<xl.CellValue?>[t('Ürün kodu'), t('Sipariş koli'), t('Paletlenen koli'), t('Fark'), t('Koli içi adet'), t('Paletlenen adet')]);
     final byProduct = <String, int>{};

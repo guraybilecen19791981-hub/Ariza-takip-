@@ -454,7 +454,17 @@ class PackOps {
     await recompute(o.id);
   }
 
-  // Tüm hareketlerden toplamları ve duruş sürelerini yeniden hesaplar
+  static Future<void> deleteOrder(PackOrder o) async {
+    for (final sub in ['events', 'photos']) {
+      final s = await ref(o.id).collection(sub).get();
+      for (final d in s.docs) {
+        await d.reference.delete();
+      }
+    }
+    await ref(o.id).delete();
+  }
+
+  // Tüm hareketlerden toplamları, duruş sürelerini ve saatleri yeniden hesaplar
   static Future<void> recompute(String id) async {
     final snap = await ref(id).get();
     final o = PackOrder.fromDoc(snap);
@@ -465,9 +475,15 @@ class PackOps {
     final stopMin = <String, int>{};
     DateTime? openAt;
     String openReason = 'diger';
+    DateTime? firstAt;
+    DateTime? lastStartToday;
+    DateTime? lastFinish;
     for (final e in events) {
       final at = e.t;
       if (at == null) continue;
+      if (e.type == 'basla') firstAt ??= at;
+      if (e.type == 'basla' && dayKey(at) == o.currentDay) lastStartToday = at;
+      if (e.type == 'bitti') lastFinish = at;
       if (e.isEntry) {
         final v = o.perBox > 0 ? e.qty * o.perBox + e.units : e.qty;
         total += v;
@@ -482,6 +498,10 @@ class PackOps {
       }
     }
     final data = <String, dynamic>{'stopMin': stopMin, 'lastUpdateAt': Timestamp.now()};
+    if (firstAt != null) data['createdAt'] = Timestamp.fromDate(firstAt);
+    if (lastStartToday != null) data['todayStartAt'] = Timestamp.fromDate(lastStartToday);
+    if (o.status == 'durdu' && openAt != null) data['stopStartedAt'] = Timestamp.fromDate(openAt);
+    if (o.status == 'bitti' && lastFinish != null) data['finishedAt'] = Timestamp.fromDate(lastFinish);
     if (o.perBox > 0) {
       data['totalUnits'] = total;
       data['totalBoxes'] = total ~/ o.perBox;
@@ -1169,13 +1189,16 @@ Future<void> editEventDialog(BuildContext context, PackOrder o, PackEvent e) asy
     context: context,
     builder: (d) => StatefulBuilder(
       builder: (d, setS) => AlertDialog(
-        title: const Text('Kaydı düzenle'),
+        title: const Text('Kaydı düzenle / sil'),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(e.displayText, style: const TextStyle(color: kMuted)),
+              const SizedBox(height: 4),
+              const Text('Saati değiştirince başlangıç, duruş ve bitiş saatleri ile toplamlar yeniden hesaplanır.',
+                  style: TextStyle(color: kMuted, fontSize: 12)),
               const SizedBox(height: 10),
               Row(children: [
                 Expanded(
@@ -1212,8 +1235,7 @@ Future<void> editEventDialog(BuildContext context, PackOrder o, PackEvent e) asy
           ),
         ),
         actions: [
-          if (e.isEntry)
-            TextButton(
+          TextButton(
               onPressed: () => Navigator.pop(d, 'sil'),
               style: TextButton.styleFrom(foregroundColor: const Color(0xFFC92A2A)),
               child: const Text('Sil'),
@@ -1351,7 +1373,35 @@ class PackDetailPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Paketleme detayı')),
+      appBar: AppBar(title: const Text('Paketleme detayı'), actions: [
+        IconButton(
+          tooltip: 'Siparişi sil',
+          icon: const Icon(Icons.delete_outline),
+          onPressed: () async {
+            final s = await PackOps.ref(orderId).get();
+            if (!s.exists) return;
+            final o = PackOrder.fromDoc(s);
+            final me = currentUser;
+            final allowed = me != null && (me.isAdmin || me.can('paketleme', 'yonet') || (me.uid == o.ownerUid && me.can('paketleme', 'gir')));
+            if (!allowed) {
+              toast('Bu siparişi silme yetkiniz yok.');
+              return;
+            }
+            if (!context.mounted) return;
+            if (!await confirm(context, 'Sipariş tamamen silinsin mi?',
+                'Sipariş ${o.orderNo}, tüm koli girişleri, duruşlar ve görseller kalıcı olarak silinecek. Bu işlem geri alınamaz.', 'Sil')) {
+              return;
+            }
+            try {
+              await PackOps.deleteOrder(o);
+              if (context.mounted) Navigator.of(context).pop();
+              toast('Sipariş silindi');
+            } catch (e) {
+              toast('Silinemedi: $e');
+            }
+          },
+        ),
+      ]),
       body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
         stream: PackOps.ref(orderId).snapshots(),
         builder: (context, snap) {
