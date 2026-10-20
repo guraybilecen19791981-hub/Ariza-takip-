@@ -43,6 +43,7 @@ class PalletOrder {
   final String createdByUid;
   final DateTime? createdAt;
   final DateTime? finishedAt;
+  final DateTime? shippedAt;
   final String finishNote;
   final List<PLine> lines;
   final int palletCount;
@@ -63,6 +64,7 @@ class PalletOrder {
     required this.createdByUid,
     required this.createdAt,
     required this.finishedAt,
+    required this.shippedAt,
     required this.finishNote,
     required this.lines,
     required this.palletCount,
@@ -89,6 +91,7 @@ class PalletOrder {
       createdByUid: (m['createdByUid'] ?? '').toString(),
       createdAt: tsToDate(m['createdAt']),
       finishedAt: tsToDate(m['finishedAt']),
+      shippedAt: tsToDate(m['shippedAt']),
       finishNote: (m['finishNote'] ?? '').toString(),
       lines: _lines(m['lines']),
       palletCount: _toInt(m['palletCount']),
@@ -103,6 +106,9 @@ class PalletOrder {
   }
 
   bool get isFinished => status == 'bitti';
+  bool get isShipped => isFinished && shippedAt != null;
+  bool get isReady => isFinished && shippedAt == null;
+  String get stateLabel => !isFinished ? 'Açık' : (isShipped ? 'Sevk edildi' : 'Sevke hazır');
   int get orderedBoxes => lines.fold(0, (a, l) => a + l.boxes);
 }
 
@@ -233,7 +239,23 @@ class PalletOps {
       ref(o.id).update({'status': 'bitti', 'finishedAt': Timestamp.now(), 'finishNote': note, 'updatedAt': FieldValue.serverTimestamp()});
 
   static Future<void> undo(PalletOrder o) =>
-      ref(o.id).update({'status': 'acik', 'finishedAt': null, 'updatedAt': FieldValue.serverTimestamp()});
+      ref(o.id).update({'status': 'acik', 'finishedAt': null, 'shippedAt': null, 'updatedAt': FieldValue.serverTimestamp()});
+
+  static Future<void> ship(PalletOrder o, DateTime? at) => ref(o.id).update({
+        'shippedAt': at == null ? null : Timestamp.fromDate(at),
+        'shippedBy': at == null ? '' : (currentUser?.name ?? ''),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+  static Future<void> deleteOrder(PalletOrder o) async {
+    for (final sub in ['pallets', 'photos']) {
+      final s = await ref(o.id).collection(sub).get();
+      for (final d in s.docs) {
+        await d.reference.delete();
+      }
+    }
+    await ref(o.id).delete();
+  }
 
   static Future<void> addPhoto(PalletOrder o, Uint8List bytes) async {
     await ref(o.id).collection('photos').add({
@@ -271,7 +293,7 @@ class PalletHome extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
           title: Column(
@@ -281,9 +303,12 @@ class PalletHome extends StatelessWidget {
               Text('${me.name} · ${me.roleLabel}', style: const TextStyle(fontSize: 12, color: Color(0xFFADB5BD))),
             ],
           ),
-          actions: [...commonActions(me)],
+          actions: [
+            IconButton(tooltip: "Sevke hazır + sevk edilenler Excel", icon: const Icon(Icons.download), onPressed: exportShipments),
+            ...commonActions(me),
+          ],
           bottom: const TabBar(
-            tabs: [Tab(text: 'Açık'), Tab(text: 'Bitenler')],
+            tabs: [Tab(text: 'Açık'), Tab(text: 'Sevke hazır'), Tab(text: 'Sevk edildi')],
             labelColor: Colors.white,
             unselectedLabelColor: Color(0xFFADB5BD),
             indicatorColor: kOrange,
@@ -300,8 +325,9 @@ class PalletHome extends StatelessWidget {
             : null,
         bottomNavigationBar: nav,
         body: const TabBarView(children: [
-          PalletList(finished: false),
-          PalletList(finished: true),
+          PalletList(mode: 0),
+          PalletList(mode: 1),
+          PalletList(mode: 2),
         ]),
       ),
     );
@@ -309,8 +335,8 @@ class PalletHome extends StatelessWidget {
 }
 
 class PalletList extends StatefulWidget {
-  final bool finished;
-  const PalletList({super.key, required this.finished});
+  final int mode; // 0 açık, 1 sevke hazır, 2 sevk edildi
+  const PalletList({super.key, required this.mode});
 
   @override
   State<PalletList> createState() => _PalletListState();
@@ -327,7 +353,7 @@ class _PalletListState extends State<PalletList> {
         if (snap.hasError) return Center(child: Text('Hata: ${snap.error}'));
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
         final q = _q.trim().toLowerCase();
-        final list = snap.data!.where((o) => o.isFinished == widget.finished).where((o) {
+        final list = snap.data!.where((o) => widget.mode == 0 ? !o.isFinished : (widget.mode == 1 ? o.isReady : o.isShipped)).where((o) {
           if (q.isEmpty) return true;
           return '${o.orderNo} ${o.customer} ${o.lines.map((l) => l.productCode).join(' ')}'.toLowerCase().contains(q);
         }).toList();
@@ -342,7 +368,7 @@ class _PalletListState extends State<PalletList> {
             if (list.isEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 40),
-                child: Center(child: Text(widget.finished ? 'Biten paletleme yok.' : 'Açık paletleme yok.', style: const TextStyle(color: kMuted))),
+                child: Center(child: Text(const ['Açık paletleme yok.', 'Sevke hazır sipariş yok.', 'Sevk edilen sipariş yok.'][widget.mode], style: const TextStyle(color: kMuted))),
               ),
             for (final o in list)
               Padding(
@@ -361,6 +387,10 @@ class _PalletListState extends State<PalletList> {
                         Expanded(
                           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                             Text('Sipariş ${o.orderNo}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                            if (o.isReady)
+                              const Text('SEVKE HAZIR', style: TextStyle(color: Color(0xFF1B6B2B), fontWeight: FontWeight.w700)),
+                            if (o.isShipped)
+                              Text('Sevk edildi: ${fmtDT(o.shippedAt)}', style: const TextStyle(color: Color(0xFF1D4ED8), fontWeight: FontWeight.w600)),
                             Text(o.customer.isEmpty ? 'Müşteri girilmedi' : o.customer, style: const TextStyle(color: kMuted)),
                             Text('${o.lines.map((l) => l.productCode).join(', ')}', style: const TextStyle(color: kMuted, fontSize: 13)),
                             Text('${o.createdBy} · ${fmtDT(o.createdAt)}${o.isFinished ? ' · Bitiş ${fmtDT(o.finishedAt)}' : ''}',
@@ -371,6 +401,12 @@ class _PalletListState extends State<PalletList> {
                           Text('${o.palletCount}', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w700)),
                           const Text('palet', style: TextStyle(color: kMuted)),
                           Text('${o.totalBoxes}${o.orderedBoxes > 0 ? '/${o.orderedBoxes}' : ''} koli', style: const TextStyle(fontSize: 13)),
+                          if (o.isFinished && canEditPallet(o))
+                            IconButton(
+                              tooltip: 'Siparişi sil',
+                              icon: const Icon(Icons.delete_outline, color: Color(0xFFC92A2A)),
+                              onPressed: () => askDeletePallet(context, o),
+                            ),
                         ]),
                       ]),
                     ),
@@ -711,7 +747,22 @@ class PalletDetailPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Paletleme detayı')),
+      appBar: AppBar(title: const Text('Paletleme detayı'), actions: [
+        IconButton(
+          tooltip: 'Siparişi sil',
+          icon: const Icon(Icons.delete_outline),
+          onPressed: () async {
+            final s = await PalletOps.ref(orderId).get();
+            if (!s.exists || !context.mounted) return;
+            final o = PalletOrder.fromDoc(s);
+            if (!o.isFinished) {
+              toast('Sadece bitmiş (sevke hazır / sevk edilmiş) siparişler silinebilir.');
+              return;
+            }
+            if (await askDeletePallet(context, o) && context.mounted) Navigator.of(context).pop();
+          },
+        ),
+      ]),
       body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
         stream: PalletOps.ref(orderId).snapshots(),
         builder: (context, snap) {
@@ -733,8 +784,16 @@ class PalletDetailPage extends StatelessWidget {
                       onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => PalletOrderFormPage(existing: o))),
                     ),
                 ]),
-                _Chip(o.isFinished ? 'Bitti' : 'Açık', o.isFinished ? const Color(0xFFE9ECEF) : const Color(0xFFD3F9D8),
-                    o.isFinished ? kMuted : const Color(0xFF1B6B2B)),
+                _Chip(
+                  o.stateLabel,
+                  !o.isFinished ? const Color(0xFFFFE8CC) : (o.isShipped ? const Color(0xFFDBE8FF) : const Color(0xFFD3F9D8)),
+                  !o.isFinished ? const Color(0xFF9A3412) : (o.isShipped ? const Color(0xFF1D4ED8) : const Color(0xFF1B6B2B)),
+                ),
+                if (o.isShipped)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text('Sevk tarihi: ${fmtFull(o.shippedAt)}', style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF1D4ED8))),
+                  ),
                 const SizedBox(height: 6),
                 Text('Müşteri: ${o.customer.isEmpty ? '-' : o.customer}'),
                 Text('${o.createdBy} · ${fmtDT(o.createdAt)}${o.isFinished ? ' · Bitiş ${fmtDT(o.finishedAt)}' : ''}', style: const TextStyle(color: kMuted)),
@@ -792,6 +851,35 @@ class PalletDetailPage extends StatelessWidget {
                       }
                     },
                     child: const Text('Bitir'),
+                  ),
+                if (edit && o.isFinished)
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(backgroundColor: o.isShipped ? kDark : const Color(0xFF1B6B2B), minimumSize: const Size(0, 48)),
+                    onPressed: () async {
+                      final at = await pickDateTime(context, o.shippedAt ?? DateTime.now(), o.isShipped ? 'Sevk tarihini düzelt' : 'Sevk tarihi ve saati');
+                      if (at == null) return;
+                      try {
+                        await PalletOps.ship(o, at);
+                        toast('Sevk tarihi kaydedildi');
+                      } catch (e) {
+                        toast('Hata: $e');
+                      }
+                    },
+                    icon: const Icon(Icons.local_shipping),
+                    label: Text(o.isShipped ? 'Sevk tarihini düzelt' : 'Sevk edildi'),
+                  ),
+                if (edit && o.isShipped)
+                  OutlinedButton(
+                    style: OutlinedButton.styleFrom(minimumSize: const Size(0, 48)),
+                    onPressed: () async {
+                      if (!await confirm(context, 'Sevk geri alınsın mı?', 'Sipariş tekrar "Sevke hazır" olur.', 'Geri al')) return;
+                      try {
+                        await PalletOps.ship(o, null);
+                      } catch (e) {
+                        toast('Hata: $e');
+                      }
+                    },
+                    child: const Text('Sevki geri al'),
                   ),
                 if (edit && o.isFinished)
                   FilledButton.icon(
@@ -942,6 +1030,95 @@ class PalletPhotos extends StatelessWidget {
         ]));
       },
     );
+  }
+}
+
+Future<bool> askDeletePallet(BuildContext context, PalletOrder o) async {
+  if (!canEditPallet(o)) {
+    toast('Silme yetkiniz yok.');
+    return false;
+  }
+  if (!await confirm(context, 'Paletleme silinsin mi?',
+      'Sipariş ${o.orderNo}, tüm paletleri ve görselleri kalıcı olarak silinecek. Bu işlem geri alınamaz.', 'Sil')) {
+    return false;
+  }
+  try {
+    await PalletOps.deleteOrder(o);
+    toast('Silindi');
+    return true;
+  } catch (e) {
+    toast('Silinemedi: $e');
+    return false;
+  }
+}
+
+Future<DateTime?> pickDateTime(BuildContext context, DateTime initial, String title) async {
+  final d = await showDatePicker(context: context, initialDate: initial, firstDate: DateTime(2024), lastDate: DateTime(2100), helpText: title);
+  if (d == null || !context.mounted) return null;
+  final t = await showTimePicker(context: context, initialTime: TimeOfDay(hour: initial.hour, minute: initial.minute), helpText: 'Sevk saati');
+  if (t == null) return null;
+  return DateTime(d.year, d.month, d.day, t.hour, t.minute);
+}
+
+// Sevke hazır + sevk edilen tüm siparişler tek Excel'de
+Future<void> exportShipments() async {
+  try {
+    toast('Sevkiyat listesi hazırlanıyor…');
+    final s = await PalletOps.col.where('status', isEqualTo: 'bitti').get();
+    final orders = s.docs.map((d) => PalletOrder.fromDoc(d)).toList()
+      ..sort((a, b) {
+        if (a.isReady != b.isReady) return a.isReady ? -1 : 1;
+        final x = a.shippedAt ?? a.finishedAt ?? DateTime(2000);
+        final y = b.shippedAt ?? b.finishedAt ?? DateTime(2000);
+        return y.compareTo(x);
+      });
+    if (orders.isEmpty) {
+      toast('Sevke hazır ya da sevk edilmiş sipariş yok.');
+      return;
+    }
+    final excel = xl.Excel.createExcel();
+    excel.rename('Sheet1', 'Sevkiyat');
+    final xl.Sheet sh = excel['Sevkiyat'];
+    final xl.Sheet det = excel['Palet detay'];
+    xl.CellValue t(String v) => xl.TextCellValue(v);
+    xl.CellValue n(int v) => xl.IntCellValue(v);
+    xl.CellValue dbl(double v) => xl.DoubleCellValue(v);
+    sh.appendRow(<xl.CellValue?>[
+      t('Durum'), t('Sipariş no'), t('Müşteri'), t('Ürünler'), t('Palet'), t('Koli'), t('Adet'), t('Brüt kg'), t('Net kg'),
+      t('Bitiş (sevke hazır)'), t('Sevk tarihi'), t('Not'),
+    ]);
+    det.appendRow(<xl.CellValue?>[
+      t('Durum'), t('Sipariş no'), t('Müşteri'), t('Sevk tarihi'), t('Palet no'), t('Palet ebatı'), t('Ürün kodu'), t('Lot no'), t('SKT'),
+      t('Koli'), t('Koli içi adet'), t('Toplam adet'), t('Brüt kg'), t('Net kg'),
+    ]);
+    for (final o in orders) {
+      sh.appendRow(<xl.CellValue?>[
+        t(o.stateLabel), t(o.orderNo), t(o.customer), t(o.lines.map((l) => l.productCode).join(', ')), n(o.palletCount), n(o.totalBoxes),
+        n(o.totalUnits), dbl(o.gross), dbl(o.net), t(fmtFull(o.finishedAt)), t(o.isShipped ? fmtFull(o.shippedAt) : ''), t(o.finishNote),
+      ]);
+      final ps = await PalletOps.ref(o.id).collection('pallets').orderBy('no').get();
+      for (final p in ps.docs.map((d) => Pallet.fromDoc(d))) {
+        for (var i = 0; i < p.items.length; i++) {
+          final it = p.items[i];
+          det.appendRow(<xl.CellValue?>[
+            t(o.stateLabel), t(o.orderNo), t(o.customer), t(o.isShipped ? fmtFull(o.shippedAt) : ''), n(p.no), t(i == 0 ? p.size : ''),
+            t(it.productCode), t(it.lot), t(it.skt), n(it.boxes), n(it.perBox), n(it.units), i == 0 ? dbl(p.gross) : null, i == 0 ? dbl(p.net) : null,
+          ]);
+        }
+      }
+    }
+    final bytes = excel.encode();
+    if (bytes == null) {
+      toast('Excel oluşturulamadı.');
+      return;
+    }
+    final dir = await getTemporaryDirectory();
+    final now = DateTime.now();
+    final file = File('${dir.path}/sevkiyat_${now.year}${two(now.month)}${two(now.day)}.xlsx');
+    await file.writeAsBytes(bytes, flush: true);
+    await Share.shareXFiles([XFile(file.path)], text: 'Sevkiyat listesi');
+  } catch (e) {
+    toast('Excel hatası: $e');
   }
 }
 

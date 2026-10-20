@@ -792,6 +792,30 @@ class PackStatusChip extends StatelessWidget {
   Widget build(BuildContext context) => _Chip(o.statusLabel, o.statusBgColor, o.statusFgColor);
 }
 
+bool canDeletePack(PackOrder o) {
+  final me = currentUser;
+  return me != null && (me.isAdmin || me.can('paketleme', 'yonet') || (me.uid == o.ownerUid && me.can('paketleme', 'gir')));
+}
+
+Future<bool> askDeletePack(BuildContext context, PackOrder o) async {
+  if (!canDeletePack(o)) {
+    toast('Bu siparişi silme yetkiniz yok.');
+    return false;
+  }
+  if (!await confirm(context, 'Sipariş tamamen silinsin mi?',
+      'Sipariş ${o.orderNo}, tüm koli girişleri, duruşlar ve görseller kalıcı olarak silinecek. Bu işlem geri alınamaz.', 'Sil')) {
+    return false;
+  }
+  try {
+    await PackOps.deleteOrder(o);
+    toast('Sipariş silindi');
+    return true;
+  } catch (e) {
+    toast('Silinemedi: $e');
+    return false;
+  }
+}
+
 class PackCard extends StatelessWidget {
   final PackOrder o;
   const PackCard({super.key, required this.o});
@@ -847,6 +871,12 @@ class PackCard extends StatelessWidget {
                 children: [
                   Text('${o.totalBoxes}', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w700)),
                   Text(o.remUnits > 0 ? 'koli + ${o.remUnits} ad.' : 'koli', style: const TextStyle(color: kMuted)),
+                  if (o.isFinished && canDeletePack(o))
+                    IconButton(
+                      tooltip: 'Siparişi sil',
+                      icon: const Icon(Icons.delete_outline, color: Color(0xFFC92A2A)),
+                      onPressed: () => askDeletePack(context, o),
+                    ),
                 ],
               ),
             ],
@@ -1381,24 +1411,8 @@ class PackDetailPage extends StatelessWidget {
             final s = await PackOps.ref(orderId).get();
             if (!s.exists) return;
             final o = PackOrder.fromDoc(s);
-            final me = currentUser;
-            final allowed = me != null && (me.isAdmin || me.can('paketleme', 'yonet') || (me.uid == o.ownerUid && me.can('paketleme', 'gir')));
-            if (!allowed) {
-              toast('Bu siparişi silme yetkiniz yok.');
-              return;
-            }
             if (!context.mounted) return;
-            if (!await confirm(context, 'Sipariş tamamen silinsin mi?',
-                'Sipariş ${o.orderNo}, tüm koli girişleri, duruşlar ve görseller kalıcı olarak silinecek. Bu işlem geri alınamaz.', 'Sil')) {
-              return;
-            }
-            try {
-              await PackOps.deleteOrder(o);
-              if (context.mounted) Navigator.of(context).pop();
-              toast('Sipariş silindi');
-            } catch (e) {
-              toast('Silinemedi: $e');
-            }
+            if (await askDeletePack(context, o) && context.mounted) Navigator.of(context).pop();
           },
         ),
       ]),
