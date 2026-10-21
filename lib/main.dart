@@ -184,8 +184,29 @@ class AppUser {
   final String role;
   final bool alarm;
   final Map<String, String> perms;
+  final DateTime? lastSeen;
+  final bool active;
+  final String via;
 
-  AppUser({required this.uid, required this.name, required this.email, required this.role, required this.alarm, required this.perms});
+  AppUser({
+    required this.uid,
+    required this.name,
+    required this.email,
+    required this.role,
+    required this.alarm,
+    required this.perms,
+    this.lastSeen,
+    this.active = false,
+    this.via = '',
+  });
+
+  // Son 10 dakika içinde uygulamayı/paneli kullanıyorsa çevrimiçi sayılır
+  bool get isOnline => active && lastSeen != null && DateTime.now().difference(lastSeen!).inMinutes < 10;
+  String get presenceText {
+    if (isOnline) return 'Çevrimiçi${via.isEmpty ? '' : ' · $via'}';
+    if (lastSeen == null) return 'Henüz görülmedi';
+    return 'Son görülme: ${fmtDT(lastSeen)}${via.isEmpty ? '' : ' · $via'}';
+  }
 
   factory AppUser.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
     final m = d.data() ?? <String, dynamic>{};
@@ -203,6 +224,9 @@ class AppUser {
       role: role,
       alarm: m['alarm'] == true,
       perms: perms,
+      lastSeen: m['lastSeen'] is Timestamp ? (m['lastSeen'] as Timestamp).toDate() : null,
+      active: m['active'] == true,
+      via: (m['lastSeenVia'] ?? '').toString(),
     );
   }
 
@@ -789,7 +813,60 @@ class _UserGateState extends State<UserGate> {
   }
 }
 
+// Çevrimiçi durumu: uygulama ekrandayken 5 dakikada bir "buradayım" yazar
+class Presence with WidgetsBindingObserver {
+  static final Presence I = Presence._();
+  Presence._();
+  Timer? _timer;
+  String? _uid;
+  bool _observing = false;
+
+  void start(String uid) {
+    if (!_observing) {
+      WidgetsBinding.instance.addObserver(this);
+      _observing = true;
+    }
+    if (_uid == uid && _timer != null) return;
+    _uid = uid;
+    _beat(true);
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(minutes: 5), (_) => _beat(true));
+  }
+
+  Future<void> stop() async {
+    _timer?.cancel();
+    _timer = null;
+    await _beat(false);
+    _uid = null;
+  }
+
+  Future<void> _beat(bool active) async {
+    final uid = _uid;
+    if (uid == null) return;
+    try {
+      await db.collection('users').doc(uid).update({'lastSeen': FieldValue.serverTimestamp(), 'active': active, 'lastSeenVia': 'Telefon'});
+    } catch (_) {}
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final uid = _uid;
+    if (uid == null) return;
+    if (state == AppLifecycleState.resumed) {
+      if (_timer == null) {
+        _beat(true);
+        _timer = Timer.periodic(const Duration(minutes: 5), (_) => _beat(true));
+      }
+    } else if (state == AppLifecycleState.paused) {
+      _timer?.cancel();
+      _timer = null;
+      _beat(false);
+    }
+  }
+}
+
 Future<void> signOut() async {
+  await Presence.I.stop();
   await Watchers.stop();
   try {
     await keepAlive.invokeMethod('stop');
@@ -862,6 +939,7 @@ class _HomePageState extends State<HomePage> {
         if (widget.me.role == 'admin') await ensureMachines();
       }
       await Watchers.ensure(widget.me);
+      Presence.I.start(widget.me.uid);
       final p = pendingFaultId;
       if (p != null) {
         pendingFaultId = null;
@@ -1933,6 +2011,16 @@ class UsersView extends StatelessWidget {
               style: TextStyle(color: kMuted),
             ),
             const SizedBox(height: 12),
+            _box(Row(children: [
+              const Icon(Icons.circle, size: 12, color: Color(0xFF2F9E44)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Şu an çevrimiçi: ${users.where((u) => u.isOnline).length} kişi',
+                    style: const TextStyle(fontWeight: FontWeight.w700)),
+              ),
+              const Text('son 10 dk', style: TextStyle(color: kMuted, fontSize: 12)),
+            ])),
+            const SizedBox(height: 12),
             for (final u in users)
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
@@ -1947,6 +2035,15 @@ class UsersView extends StatelessWidget {
                             children: [
                               Text(u.name, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
                               Text(u.email, style: const TextStyle(color: kMuted, fontSize: 13)),
+                              const SizedBox(height: 2),
+                              Row(children: [
+                                Icon(Icons.circle, size: 10, color: u.isOnline ? const Color(0xFF2F9E44) : const Color(0xFFADB5BD)),
+                                const SizedBox(width: 6),
+                                Flexible(
+                                  child: Text(u.presenceText,
+                                      style: TextStyle(fontSize: 12, color: u.isOnline ? const Color(0xFF1B6B2B) : kMuted, fontWeight: u.isOnline ? FontWeight.w600 : FontWeight.normal)),
+                                ),
+                              ]),
                             ],
                           ),
                         ),

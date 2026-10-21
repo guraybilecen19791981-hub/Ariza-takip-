@@ -6,7 +6,13 @@ part of 'main.dart';
 
 double _toDouble(dynamic v) => (v is num) ? v.toDouble() : 0.0;
 double? parseNum(String s) => double.tryParse(s.trim().replaceAll(',', '.'));
-String fmtKg(double v) => v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+String _trimNum(double v, int dec) {
+  var t = v.toStringAsFixed(dec);
+  if (t.contains('.')) t = t.replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '');
+  return t;
+}
+String fmtKg(double v) => _trimNum(v, 2);
+String fmtKg3(double v) => _trimNum(v, 3);
 
 class PLine {
   String productCode;
@@ -14,7 +20,9 @@ class PLine {
   int perBox;
   String lot;
   String skt;
-  PLine({required this.productCode, required this.boxes, required this.perBox, this.lot = '', this.skt = ''});
+  double boxGross; // 1 koli brüt kg
+  double boxNet; // 1 koli net kg
+  PLine({required this.productCode, required this.boxes, required this.perBox, this.lot = '', this.skt = '', this.boxGross = 0, this.boxNet = 0});
 
   factory PLine.fromMap(dynamic m) {
     final x = (m is Map) ? m : <String, dynamic>{};
@@ -24,12 +32,18 @@ class PLine {
       perBox: _toInt(x['perBox']),
       lot: (x['lot'] ?? '').toString(),
       skt: (x['skt'] ?? '').toString(),
+      boxGross: _toDouble(x['boxGross']),
+      boxNet: _toDouble(x['boxNet']),
     );
   }
 
-  Map<String, dynamic> toMap() => {'productCode': productCode, 'boxes': boxes, 'perBox': perBox, 'lot': lot, 'skt': skt};
+  Map<String, dynamic> toMap() =>
+      {'productCode': productCode, 'boxes': boxes, 'perBox': perBox, 'lot': lot, 'skt': skt, 'boxGross': boxGross, 'boxNet': boxNet};
   int get units => boxes * perBox;
-  PLine copy() => PLine(productCode: productCode, boxes: boxes, perBox: perBox, lot: lot, skt: skt);
+  double get gross => boxes * boxGross;
+  double get net => boxes * boxNet;
+  bool get hasKg => boxGross > 0 || boxNet > 0;
+  PLine copy() => PLine(productCode: productCode, boxes: boxes, perBox: perBox, lot: lot, skt: skt, boxGross: boxGross, boxNet: boxNet);
 }
 
 List<PLine> _lines(dynamic v) => v is List ? v.map((e) => PLine.fromMap(e)).toList() : <PLine>[];
@@ -185,7 +199,13 @@ class PalletOps {
     });
   }
 
-  static Future<void> savePallet(PalletOrder o, Pallet? existing, int no, String size, double gross, double net, List<PLine> items) async {
+  static Future<void> savePallet(PalletOrder o, Pallet? existing, int no, String size, List<PLine> items) async {
+    double gross = items.fold(0.0, (a, l) => a + l.gross);
+    double net = items.fold(0.0, (a, l) => a + l.net);
+    if (existing != null && !items.any((l) => l.hasKg)) {
+      gross = existing.gross; // eski kayıtlar: koli ağırlığı girilmemişse eski toplamı koru
+      net = existing.net;
+    }
     final data = {
       'no': no,
       'size': size,
@@ -430,19 +450,31 @@ class _LineCtrls {
   final TextEditingController perBox;
   final TextEditingController lot;
   final TextEditingController skt;
+  final TextEditingController boxGross;
+  final TextEditingController boxNet;
   _LineCtrls(PLine l)
       : code = TextEditingController(text: l.productCode),
         boxes = TextEditingController(text: l.boxes > 0 ? '${l.boxes}' : ''),
         perBox = TextEditingController(text: l.perBox > 0 ? '${l.perBox}' : ''),
         lot = TextEditingController(text: l.lot),
-        skt = TextEditingController(text: l.skt);
+        skt = TextEditingController(text: l.skt),
+        boxGross = TextEditingController(text: l.boxGross > 0 ? fmtKg3(l.boxGross) : ''),
+        boxNet = TextEditingController(text: l.boxNet > 0 ? fmtKg3(l.boxNet) : '');
   PLine toLine() => PLine(
         productCode: code.text.trim(),
         boxes: int.tryParse(boxes.text.trim()) ?? 0,
         perBox: int.tryParse(perBox.text.trim()) ?? 0,
         lot: lot.text.trim(),
         skt: skt.text.trim(),
+        boxGross: parseNum(boxGross.text) ?? 0,
+        boxNet: parseNum(boxNet.text) ?? 0,
       );
+  void fillFrom(PLine p) {
+    if (boxGross.text.trim().isEmpty && p.boxGross > 0) boxGross.text = fmtKg3(p.boxGross);
+    if (boxNet.text.trim().isEmpty && p.boxNet > 0) boxNet.text = fmtKg3(p.boxNet);
+    if (lot.text.trim().isEmpty) lot.text = p.lot;
+    if (skt.text.trim().isEmpty) skt.text = p.skt;
+  }
 }
 
 class PalletOrderFormPage extends StatefulWidget {
@@ -599,8 +631,6 @@ class PalletFormPage extends StatefulWidget {
 class _PalletFormPageState extends State<PalletFormPage> {
   late final TextEditingController _no = TextEditingController(text: '${widget.existing?.no ?? widget.order.nextNo}');
   late final TextEditingController _size = TextEditingController(text: widget.existing?.size ?? '120x80x');
-  late final TextEditingController _gross = TextEditingController(text: widget.existing == null ? '' : fmtKg(widget.existing!.gross));
-  late final TextEditingController _net = TextEditingController(text: widget.existing == null ? '' : fmtKg(widget.existing!.net));
   late final List<_LineCtrls> _items = (widget.existing?.items ??
           <PLine>[
             if (widget.order.lines.isNotEmpty)
@@ -611,6 +641,35 @@ class _PalletFormPageState extends State<PalletFormPage> {
       .map((l) => _LineCtrls(l))
       .toList();
   bool _busy = false;
+  final Map<String, PLine> _prev = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPrev();
+  }
+
+  // Önceki paletlerdeki aynı ürünün koli kg, lot ve SKT bilgisini öneri olarak getirir
+  Future<void> _loadPrev() async {
+    try {
+      final s = await PalletOps.ref(widget.order.id).collection('pallets').orderBy('no').get();
+      for (final p in s.docs.map((d) => Pallet.fromDoc(d))) {
+        for (final it in p.items) {
+          if (it.productCode.isNotEmpty) _prev[it.productCode] = it;
+        }
+      }
+      if (!mounted || widget.existing != null) return;
+      setState(() {
+        for (final r in _items) {
+          final p = _prev[r.code.text.trim()];
+          if (p != null) r.fillFrom(p);
+        }
+      });
+    } catch (_) {}
+  }
+
+  double get _sumGross => _items.fold(0.0, (a, r) => a + r.toLine().gross);
+  double get _sumNet => _items.fold(0.0, (a, r) => a + r.toLine().net);
 
   Future<void> _save() async {
     final no = int.tryParse(_no.text.trim());
@@ -625,7 +684,7 @@ class _PalletFormPageState extends State<PalletFormPage> {
     }
     setState(() => _busy = true);
     try {
-      await PalletOps.savePallet(widget.order, widget.existing, no, _size.text.trim(), parseNum(_gross.text) ?? 0, parseNum(_net.text) ?? 0, items);
+      await PalletOps.savePallet(widget.order, widget.existing, no, _size.text.trim(), items);
       if (!mounted) return;
       Navigator.of(context).pop();
       toast('Palet $no kaydedildi');
@@ -647,7 +706,10 @@ class _PalletFormPageState extends State<PalletFormPage> {
         break;
       }
     }
-    setState(() => _items.add(_LineCtrls(PLine(productCode: code, boxes: 0, perBox: perBox))));
+    final c = _LineCtrls(PLine(productCode: code, boxes: 0, perBox: perBox));
+    final p = _prev[code];
+    if (p != null) c.fillFrom(p);
+    setState(() => _items.add(c));
   }
 
   @override
@@ -662,12 +724,6 @@ class _PalletFormPageState extends State<PalletFormPage> {
             Expanded(child: TextField(controller: _no, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Palet no'))),
             const SizedBox(width: 10),
             Expanded(flex: 2, child: TextField(controller: _size, decoration: const InputDecoration(labelText: 'Palet ebatı (cm)', hintText: '120x80x150'))),
-          ]),
-          const SizedBox(height: 12),
-          Row(children: [
-            Expanded(child: TextField(controller: _gross, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Brüt kg'))),
-            const SizedBox(width: 10),
-            Expanded(child: TextField(controller: _net, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Net kg'))),
           ]),
           const SizedBox(height: 16),
           const Text('Paletteki ürünler', style: TextStyle(fontWeight: FontWeight.w600)),
@@ -685,7 +741,13 @@ class _PalletFormPageState extends State<PalletFormPage> {
                 Row(children: [
                   Expanded(flex: 3, child: TextField(controller: _items[i].code, decoration: const InputDecoration(labelText: 'Ürün kodu', isDense: true))),
                   const SizedBox(width: 6),
-                  Expanded(flex: 2, child: TextField(controller: _items[i].boxes, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Koli', isDense: true))),
+                  Expanded(
+                      flex: 2,
+                      child: TextField(
+                          controller: _items[i].boxes,
+                          keyboardType: TextInputType.number,
+                          onChanged: (_) => setState(() {}),
+                          decoration: const InputDecoration(labelText: 'Koli', isDense: true))),
                   const SizedBox(width: 6),
                   Expanded(flex: 2, child: TextField(controller: _items[i].perBox, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Koli içi', isDense: true))),
                   IconButton(
@@ -707,9 +769,44 @@ class _PalletFormPageState extends State<PalletFormPage> {
                   ),
                   const SizedBox(width: 48),
                 ]),
+                const SizedBox(height: 6),
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _items[i].boxGross,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (_) => setState(() {}),
+                      decoration: const InputDecoration(labelText: '1 koli brüt kg', isDense: true),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: TextField(
+                      controller: _items[i].boxNet,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (_) => setState(() {}),
+                      decoration: const InputDecoration(labelText: '1 koli net kg', isDense: true),
+                    ),
+                  ),
+                  const SizedBox(width: 48),
+                ]),
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, right: 10),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Text('Bu ürün: brüt ${fmtKg(_items[i].toLine().gross)} kg · net ${fmtKg(_items[i].toLine().net)} kg',
+                        style: const TextStyle(color: kMuted, fontSize: 12)),
+                  ),
+                ),
               ]),
             ),
           OutlinedButton.icon(onPressed: _addItem, icon: const Icon(Icons.add_box), label: const Text('Yeni koli / ürün ekle')),
+          const SizedBox(height: 14),
+          _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Palet toplamı: brüt ${fmtKg(_sumGross)} kg · net ${fmtKg(_sumNet)} kg', style: const TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 2),
+            const Text('Not: Palet ağırlıkları dahil değildir.', style: TextStyle(color: Color(0xFF9A3412), fontSize: 13)),
+          ])),
           const SizedBox(height: 20),
           FilledButton(onPressed: _busy ? null : _save, child: Text(_busy ? 'Kaydediliyor…' : 'Paleti kaydet')),
           if (widget.existing != null) ...[
@@ -806,6 +903,7 @@ class PalletDetailPage extends StatelessWidget {
                 _kv('Adet', '${o.totalUnits}'),
                 _kv('Brüt kg', fmtKg(o.gross)),
                 _kv('Net kg', fmtKg(o.net)),
+                const Text('Palet ağırlıkları dahil değildir.', style: TextStyle(color: Color(0xFF9A3412), fontSize: 12)),
               ])),
               const SizedBox(height: 10),
               _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -919,10 +1017,11 @@ class PalletDetailPage extends StatelessWidget {
                               Expanded(child: Text('Palet ${p.no}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
                               Text(p.size, style: const TextStyle(color: kMuted)),
                             ]),
-                            Text('Brüt ${fmtKg(p.gross)} kg · Net ${fmtKg(p.net)} kg · ${p.boxes} koli', style: const TextStyle(color: kMuted, fontSize: 13)),
+                            Text('Brüt ${fmtKg(p.gross)} kg · Net ${fmtKg(p.net)} kg · ${p.boxes} koli (palet ağırlığı hariç)', style: const TextStyle(color: kMuted, fontSize: 13)),
                             for (final it in p.items)
                               Text('• ${it.productCode}: ${it.boxes} koli${it.perBox > 0 ? ' × ${it.perBox} = ${it.units} adet' : ''}'
-                                  '${it.lot.isNotEmpty ? ' · Lot ${it.lot}' : ''}${it.skt.isNotEmpty ? ' · SKT ${it.skt}' : ''}'),
+                                  '${it.lot.isNotEmpty ? ' · Lot ${it.lot}' : ''}${it.skt.isNotEmpty ? ' · SKT ${it.skt}' : ''}'
+                                  '${it.hasKg ? ' · ${fmtKg(it.gross)}/${fmtKg(it.net)} kg' : ''}'),
                           ])),
                         ),
                       ),
@@ -1055,7 +1154,7 @@ Future<bool> askDeletePallet(BuildContext context, PalletOrder o) async {
 Future<DateTime?> pickDateTime(BuildContext context, DateTime initial, String title) async {
   final d = await showDatePicker(context: context, initialDate: initial, firstDate: DateTime(2024), lastDate: DateTime(2100), helpText: title);
   if (d == null || !context.mounted) return null;
-  final t = await showTimePicker(context: context, initialTime: TimeOfDay(hour: initial.hour, minute: initial.minute), helpText: 'Sevk saati');
+  final t = await showTimePicker(context: context, initialTime: TimeOfDay(hour: initial.hour, minute: initial.minute), helpText: title);
   if (t == null) return null;
   return DateTime(d.year, d.month, d.day, t.hour, t.minute);
 }
@@ -1089,7 +1188,7 @@ Future<void> exportShipments() async {
     ]);
     det.appendRow(<xl.CellValue?>[
       t('Durum'), t('Sipariş no'), t('Müşteri'), t('Sevk tarihi'), t('Palet no'), t('Palet ebatı'), t('Ürün kodu'), t('Lot no'), t('SKT'),
-      t('Koli'), t('Koli içi adet'), t('Toplam adet'), t('Brüt kg'), t('Net kg'),
+      t('Koli'), t('Koli içi adet'), t('Toplam adet'), t('1 koli brüt kg'), t('1 koli net kg'), t('Brüt kg'), t('Net kg'),
     ]);
     for (final o in orders) {
       sh.appendRow(<xl.CellValue?>[
@@ -1102,11 +1201,16 @@ Future<void> exportShipments() async {
           final it = p.items[i];
           det.appendRow(<xl.CellValue?>[
             t(o.stateLabel), t(o.orderNo), t(o.customer), t(o.isShipped ? fmtFull(o.shippedAt) : ''), n(p.no), t(i == 0 ? p.size : ''),
-            t(it.productCode), t(it.lot), t(it.skt), n(it.boxes), n(it.perBox), n(it.units), i == 0 ? dbl(p.gross) : null, i == 0 ? dbl(p.net) : null,
+            t(it.productCode), t(it.lot), t(it.skt), n(it.boxes), n(it.perBox), n(it.units),
+            it.hasKg ? dbl(it.boxGross) : null, it.hasKg ? dbl(it.boxNet) : null,
+            p.items.any((x) => x.hasKg) ? dbl(it.gross) : (i == 0 ? dbl(p.gross) : null),
+            p.items.any((x) => x.hasKg) ? dbl(it.net) : (i == 0 ? dbl(p.net) : null),
           ]);
         }
       }
     }
+    sh.appendRow(<xl.CellValue?>[]);
+    sh.appendRow(<xl.CellValue?>[t('Not: Brüt ve net ağırlıklara palet ağırlıkları dahil değildir.')]);
     final bytes = excel.encode();
     if (bytes == null) {
       toast('Excel oluşturulamadı.');
@@ -1145,16 +1249,19 @@ Future<void> exportPackingList(PalletOrder o) async {
     sh.appendRow(<xl.CellValue?>[t('Tarih'), t(fmtFull(DateTime.now()))]);
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
-      t('Palet no'), t('Palet ebatı (cm)'), t('Ürün kodu'), t('Lot no'), t('SKT'), t('Koli'), t('Koli içi adet'), t('Toplam adet'), t('Brüt kg'), t('Net kg'),
+      t('Palet no'), t('Palet ebatı (cm)'), t('Ürün kodu'), t('Lot no'), t('SKT'), t('Koli'), t('Koli içi adet'), t('Toplam adet'),
+      t('1 koli brüt kg'), t('1 koli net kg'), t('Brüt kg'), t('Net kg'),
     ]);
     int tb = 0, tu = 0;
     double tg = 0, tn = 0;
     for (final p in pallets) {
       for (var i = 0; i < p.items.length; i++) {
         final it = p.items[i];
+        final legacy = !p.items.any((x) => x.hasKg);
         sh.appendRow(<xl.CellValue?>[
           n(p.no), t(i == 0 ? p.size : ''), t(it.productCode), t(it.lot), t(it.skt), n(it.boxes), n(it.perBox), n(it.units),
-          i == 0 ? dbl(p.gross) : null, i == 0 ? dbl(p.net) : null,
+          it.hasKg ? dbl(it.boxGross) : null, it.hasKg ? dbl(it.boxNet) : null,
+          legacy ? (i == 0 ? dbl(p.gross) : null) : dbl(it.gross), legacy ? (i == 0 ? dbl(p.net) : null) : dbl(it.net),
         ]);
       }
       tb += p.boxes;
@@ -1163,7 +1270,8 @@ Future<void> exportPackingList(PalletOrder o) async {
       tn += p.net;
     }
     sh.appendRow(<xl.CellValue?>[]);
-    sh.appendRow(<xl.CellValue?>[t('TOPLAM'), t('${pallets.length} palet'), null, null, null, n(tb), null, n(tu), dbl(tg), dbl(tn)]);
+    sh.appendRow(<xl.CellValue?>[t('TOPLAM'), t('${pallets.length} palet'), null, null, null, n(tb), null, n(tu), null, null, dbl(tg), dbl(tn)]);
+    sh.appendRow(<xl.CellValue?>[t('Not: Brüt ve net ağırlıklara palet ağırlıkları dahil değildir.')]);
 
     sum.appendRow(<xl.CellValue?>[t('Ürün kodu'), t('Sipariş koli'), t('Paletlenen koli'), t('Fark'), t('Koli içi adet'), t('Paletlenen adet')]);
     final byProduct = <String, int>{};

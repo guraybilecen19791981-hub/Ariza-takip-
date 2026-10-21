@@ -433,6 +433,49 @@ class PackOps {
     if (perBox != o.perBox) await recompute(o.id);
   }
 
+  // Siparişin başlangıç / bitiş saatini düzeltir (ilgili hareketlerin saatini değiştirir)
+  static Future<void> setTimes(PackOrder o, DateTime? start, DateTime? finish) async {
+    final evSnap = await ref(o.id).collection('events').orderBy('t2').get();
+    final events = evSnap.docs.map((d) => PackEvent.fromDoc(d)).toList();
+    final changes = <String>[];
+    Map<String, dynamic> tdata(DateTime at) => {
+          't': Timestamp.fromDate(at),
+          't2': at.millisecondsSinceEpoch,
+          'editedBy': currentUser?.name ?? '',
+          'editedAt': Timestamp.now(),
+        };
+    if (start != null && (o.createdAt == null || start.difference(o.createdAt!).inMinutes.abs() >= 1)) {
+      PackEvent? first;
+      for (final e in events) {
+        if (e.type == 'basla') {
+          first = e;
+          break;
+        }
+      }
+      if (first != null) {
+        await ref(o.id).collection('events').doc(first.id).update(tdata(start));
+      } else {
+        await ref(o.id).update({'createdAt': Timestamp.fromDate(start)});
+      }
+      changes.add('Başlangıç ${fmtFull(o.createdAt)} → ${fmtFull(start)}');
+    }
+    if (finish != null && o.isFinished && (o.finishedAt == null || finish.difference(o.finishedAt!).inMinutes.abs() >= 1)) {
+      PackEvent? last;
+      for (final e in events) {
+        if (e.type == 'bitti') last = e;
+      }
+      if (last != null) {
+        await ref(o.id).collection('events').doc(last.id).update(tdata(finish));
+      } else {
+        await ref(o.id).update({'finishedAt': Timestamp.fromDate(finish)});
+      }
+      changes.add('Bitiş ${fmtFull(o.finishedAt)} → ${fmtFull(finish)}');
+    }
+    if (changes.isEmpty) return;
+    await _addEvent(o.id, _event('duzenle', 'Saat düzeltildi: ${changes.join(', ')}'));
+    await recompute(o.id);
+  }
+
   static Future<void> editEvent(PackOrder o, PackEvent e, DateTime at, int qty, int units) async {
     final data = <String, dynamic>{
       't': Timestamp.fromDate(at),
@@ -1166,6 +1209,8 @@ Future<void> editOrderDialog(BuildContext context, PackOrder o) async {
   final product = TextEditingController(text: o.productCode);
   final perBox = TextEditingController(text: o.perBox > 0 ? '${o.perBox}' : '');
   String type = kWorkTypes.containsKey(o.workType) ? o.workType : 'uretim';
+  DateTime start = o.createdAt ?? DateTime.now();
+  DateTime finish = o.finishedAt ?? DateTime.now();
   final ok = await showDialog<bool>(
     context: context,
     builder: (d) => StatefulBuilder(
@@ -1187,6 +1232,32 @@ Future<void> editOrderDialog(BuildContext context, PackOrder o) async {
               TextField(controller: product, decoration: const InputDecoration(labelText: 'Ürün kodu')),
               const SizedBox(height: 10),
               TextField(controller: perBox, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Koli içi adet')),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.play_arrow, size: 18),
+                  label: Text('Başlangıç: ${fmtFull(start)}'),
+                  onPressed: () async {
+                    final v = await pickDateTime(d, start, 'Başlangıç tarihi ve saati');
+                    if (v != null) setS(() => start = v);
+                  },
+                ),
+              ),
+              if (o.isFinished) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.flag, size: 18),
+                    label: Text('Bitiş: ${fmtFull(finish)}'),
+                    onPressed: () async {
+                      final v = await pickDateTime(d, finish, 'Bitiş tarihi ve saati');
+                      if (v != null) setS(() => finish = v);
+                    },
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -1205,6 +1276,7 @@ Future<void> editOrderDialog(BuildContext context, PackOrder o) async {
   }
   try {
     await PackOps.editOrder(o, order.text.trim(), product.text.trim(), type, pb);
+    await PackOps.setTimes(o, start, o.isFinished ? finish : null);
     toast('Kaydedildi');
   } catch (e) {
     toast('Kaydedilemedi: $e');
