@@ -17,6 +17,7 @@ import 'package:share_plus/share_plus.dart';
 
 part 'pack.dart';
 part 'pallet.dart';
+part 'machine.dart';
 
 // ---------------------------------------------------------------------------
 // Ayarlar
@@ -58,31 +59,32 @@ const Map<String, String> kRoleLabels = {
 // Panel yetkileri: yok < gor < gir < yonet
 const List<String> kPermLevels = ['yok', 'gor', 'gir', 'yonet'];
 const Map<String, String> kPermLabels = {'yok': 'Yok', 'gor': 'Görür', 'gir': 'Girer / düzenler', 'yonet': 'Yönetir / onaylar'};
-const Map<String, String> kModules = {'ariza': 'Arıza', 'paketleme': 'Paketleme', 'paletleme': 'Paletleme', 'rapor': 'Raporlar / Excel'};
+const Map<String, String> kModules = {'ariza': 'Arıza', 'paketleme': 'Paketleme', 'paletleme': 'Paletleme', 'hat': 'Makine takip', 'rapor': 'Raporlar / Excel'};
 
 Map<String, String> defaultPerms(String role) {
-  Map<String, String> p(String a, String pk, String pl, String r) => {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'rapor': r};
+  Map<String, String> p(String a, String pk, String pl, String h, String r) => {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'rapor': r};
   switch (role) {
     case 'admin':
-      return p('yonet', 'yonet', 'yonet', 'yonet');
+      return p('yonet', 'yonet', 'yonet', 'yonet', 'yonet');
     case 'sef':
-      return p('yonet', 'gor', 'yok', 'gor');
+      return p('yonet', 'gor', 'yok', 'gor', 'gor');
     case 'teknisyen':
+      return p('gir', 'yok', 'yok', 'gor', 'yok');
     case 'bildiren':
-      return p('gir', 'yok', 'yok', 'yok');
+      return p('gir', 'yok', 'yok', 'yok', 'yok');
     case 'paketci':
-      return p('gir', 'gir', 'gor', 'yok');
+      return p('gir', 'gir', 'gor', 'gir', 'yok');
     case 'vardiya':
-      return p('gir', 'yonet', 'gor', 'gor');
+      return p('gir', 'yonet', 'gor', 'yonet', 'gor');
     case 'kalite':
     case 'ihracat':
     case 'planlama':
     case 'izleyen':
-      return p('gor', 'gor', 'gor', 'gor');
+      return p('gor', 'gor', 'gor', 'gor', 'gor');
     case 'depo':
-      return p('gir', 'gor', 'gir', 'yok');
+      return p('gir', 'gor', 'gir', 'yok', 'yok');
   }
-  return p('yok', 'yok', 'yok', 'yok');
+  return p('yok', 'yok', 'yok', 'yok', 'yok');
 }
 
 int permRank(String? p) {
@@ -183,6 +185,7 @@ class AppUser {
   final String email;
   final String role;
   final bool alarm;
+  final bool machineAlarm;
   final Map<String, String> perms;
   final DateTime? lastSeen;
   final bool active;
@@ -194,6 +197,7 @@ class AppUser {
     required this.email,
     required this.role,
     required this.alarm,
+    this.machineAlarm = false,
     required this.perms,
     this.lastSeen,
     this.active = false,
@@ -223,6 +227,7 @@ class AppUser {
       email: (m['email'] ?? '').toString(),
       role: role,
       alarm: m['alarm'] == true,
+      machineAlarm: m['machineAlarm'] == true,
       perms: perms,
       lastSeen: m['lastSeen'] is Timestamp ? (m['lastSeen'] as Timestamp).toDate() : null,
       active: m['active'] == true,
@@ -423,6 +428,25 @@ class Notifier {
         const NotificationDetails(android: details), payload: 'pack:$orderId');
   }
 
+  static Future<void> machineAlert(String id, String title, String body) async {
+    final details = AndroidNotificationDetails(
+      'makine_alarm_v1',
+      'Makine duruş alarmı',
+      channelDescription: 'Hat makinesi durduğunda susturulana kadar çalar',
+      importance: Importance.max,
+      priority: Priority.max,
+      category: AndroidNotificationCategory.alarm,
+      playSound: true,
+      sound: UriAndroidNotificationSound('content://settings/system/alarm_alert'),
+      audioAttributesUsage: AudioAttributesUsage.alarm,
+      enableVibration: true,
+      additionalFlags: Int32List.fromList(<int>[4]),
+      autoCancel: true,
+      visibility: NotificationVisibility.public,
+    );
+    await notif.show(id.hashCode & 0x3fffffff, title, body, NotificationDetails(android: details), payload: 'mach:$id');
+  }
+
   static Future<void> cancel(String faultId) async {
     try {
       await notif.cancel(idFor(faultId));
@@ -437,6 +461,11 @@ void openPayload(String payload) {
     pendingFaultId = payload;
     return;
   }
+  if (payload.startsWith('mach:')) {
+    navKey.currentState?.push(MaterialPageRoute(
+        builder: (_) => Scaffold(appBar: AppBar(title: const Text('Makine takip')), body: const MachineLive())));
+    return;
+  }
   if (payload.startsWith('pack:')) {
     final id = payload.substring(5);
     navKey.currentState?.push(MaterialPageRoute(builder: (_) => PackDetailPage(orderId: id)));
@@ -447,7 +476,7 @@ void openPayload(String payload) {
 
 List<Widget> commonActions(AppUser me) {
   return [
-    if (me.getsAlarm || me.getsPackAlerts)
+    if (me.getsAlarm || me.getsPackAlerts || me.machineAlarm)
       IconButton(
         tooltip: 'Bildirimler için pil ayarı',
         icon: const Icon(Icons.battery_alert),
@@ -469,11 +498,12 @@ class Watchers {
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _alarmSub;
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _assignSub;
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _packSub;
+  static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _machSub;
   static String _key = '';
   static final Set<String> _seen = <String>{};
 
   static Future<void> ensure(AppUser u) async {
-    final key = '${u.uid}|${u.role}|${u.alarm}';
+    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}';
     if (key == _key) return;
     await stop();
     _key = key;
@@ -537,8 +567,24 @@ class Watchers {
       }, onError: (_) {});
     }
 
+    if (u.machineAlarm) {
+      final since = Timestamp.fromDate(DateTime.now().subtract(const Duration(seconds: 10)));
+      _machSub = db.collection('machineAlerts').where('createdAt', isGreaterThan: since).snapshots().listen((s) {
+        for (final c in s.docChanges) {
+          if (c.type != DocumentChangeType.added) continue;
+          final m = c.doc.data() ?? <String, dynamic>{};
+          if (!_seen.add('mach:${c.doc.id}')) continue;
+          Notifier.machineAlert(
+            c.doc.id,
+            'MAKİNE DURDU: ${m['machineName'] ?? ''}',
+            '${m['label'] ?? ''}${(m['note'] ?? '').toString().isEmpty ? '' : ' · ${m['note']}'}${(m['line'] ?? '').toString().isEmpty ? '' : ' · ${m['line']}'} · ${m['by'] ?? ''}',
+          );
+        }
+      }, onError: (_) {});
+    }
+
     try {
-      if ((u.role == 'bildiren' || u.role == 'paketci') && !u.alarm) {
+      if ((u.role == 'bildiren' || u.role == 'paketci') && !u.alarm && !u.machineAlarm) {
         await keepAlive.invokeMethod('stop');
       } else {
         await keepAlive.invokeMethod('start');
@@ -550,7 +596,9 @@ class Watchers {
     await _alarmSub?.cancel();
     await _assignSub?.cancel();
     await _packSub?.cancel();
+    await _machSub?.cancel();
     _packSub = null;
+    _machSub = null;
     _alarmSub = null;
     _assignSub = null;
     _key = '';
@@ -958,6 +1006,13 @@ class _HomePageState extends State<HomePage> {
     if (packFirst && me.can('paketleme', 'gor')) modules.add('paketleme');
     if (me.can('ariza', 'gor')) modules.add('ariza');
     if (!packFirst && me.can('paketleme', 'gor')) modules.add('paketleme');
+    if (me.can('hat', 'gor')) {
+      if (me.role == 'paketci') {
+        modules.insert(modules.indexOf('paketleme') + 1, 'hat');
+      } else {
+        modules.add('hat');
+      }
+    }
     if (me.role == 'depo' && me.can('paletleme', 'gor')) {
       modules.insert(0, 'paletleme');
     } else if (me.can('paletleme', 'gor')) {
@@ -978,8 +1033,10 @@ class _HomePageState extends State<HomePage> {
         destinations: [
           for (final m in modules)
             NavigationDestination(
-              icon: Icon(m == 'ariza' ? Icons.build_circle_outlined : (m == 'paketleme' ? Icons.inventory_2_outlined : Icons.layers_outlined)),
-              label: m == 'ariza' ? 'Arıza' : (m == 'paketleme' ? 'Paketleme' : 'Paletleme'),
+              icon: Icon(m == 'ariza'
+                  ? Icons.build_circle_outlined
+                  : (m == 'paketleme' ? Icons.inventory_2_outlined : (m == 'hat' ? Icons.precision_manufacturing_outlined : Icons.layers_outlined))),
+              label: m == 'ariza' ? 'Arıza' : (m == 'paketleme' ? 'Paketleme' : (m == 'hat' ? 'Makineler' : 'Paletleme')),
             ),
         ],
       );
@@ -987,6 +1044,7 @@ class _HomePageState extends State<HomePage> {
     final current = modules[_module];
     if (current == 'paketleme') return PackHome(me: me, nav: nav);
     if (current == 'paletleme') return PalletHome(me: me, nav: nav);
+    if (current == 'hat') return MachineHome(me: me, nav: nav);
     return _arizaScaffold(context, me, nav);
   }
 
@@ -2007,7 +2065,7 @@ class UsersView extends StatelessWidget {
             const Text(
               'Kullanıcıyı buradan ekleyebilir ya da kişi telefondan "Yeni hesap oluştur" ile kayıt olabilir. '
               'Rol seçince panel yetkileri otomatik dolar; isterseniz her paneli ayrıca değiştirin. '
-              'Alarm açık olanların telefonunda yeni arızada alarm çalar.',
+              'Alarm açık olanların telefonunda yeni arızada alarm çalar. Makine anahtarı açık olanlara makine duruş alarmı gider.',
               style: TextStyle(color: kMuted),
             ),
             const SizedBox(height: 12),
@@ -2071,6 +2129,15 @@ class UsersView extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(width: 12),
+                        Column(
+                          children: [
+                            const Text('Makine', style: TextStyle(fontSize: 12, color: kMuted)),
+                            Switch(
+                              value: u.machineAlarm,
+                              onChanged: (v) => db.collection('users').doc(u.uid).update({'machineAlarm': v}),
+                            ),
+                          ],
+                        ),
                         Column(
                           children: [
                             const Text('Alarm', style: TextStyle(fontSize: 12, color: kMuted)),
