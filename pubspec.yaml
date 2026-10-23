@@ -1,7 +1,7 @@
 name: ariza_takip
 description: Bind Takip - şirket içi takip uygulaması
 publish_to: 'none'
-version: 1.8.0+9
+version: 1.9.0+10
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
