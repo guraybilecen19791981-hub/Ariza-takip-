@@ -186,6 +186,7 @@ class AppUser {
   final String role;
   final bool alarm;
   final bool machineAlarm;
+  final List<String> lines;
   final Map<String, String> perms;
   final DateTime? lastSeen;
   final bool active;
@@ -198,6 +199,7 @@ class AppUser {
     required this.role,
     required this.alarm,
     this.machineAlarm = false,
+    this.lines = const [],
     required this.perms,
     this.lastSeen,
     this.active = false,
@@ -228,6 +230,7 @@ class AppUser {
       role: role,
       alarm: m['alarm'] == true,
       machineAlarm: m['machineAlarm'] == true,
+      lines: (m['lines'] is List) ? (m['lines'] as List).map((e) => e.toString()).toList() : const <String>[],
       perms: perms,
       lastSeen: m['lastSeen'] is Timestamp ? (m['lastSeen'] as Timestamp).toDate() : null,
       active: m['active'] == true,
@@ -2149,6 +2152,14 @@ class UsersView extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (u.role != 'admin' && u.role != 'bekliyor' && u.can('hat', 'gor')) ...[
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: () => pickUserLines(context, u),
+                        icon: const Icon(Icons.precision_manufacturing_outlined, size: 18),
+                        label: Text('Makine hatları: ${u.can('hat', 'yonet') ? 'Tümü (yönetici)' : (u.lines.isEmpty ? 'Tümü' : u.lines.join(', '))}'),
+                      ),
+                    ],
                     if (u.role != 'admin' && u.role != 'bekliyor') ...[
                       const SizedBox(height: 10),
                       const Text('Panel yetkileri', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
