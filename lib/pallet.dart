@@ -271,6 +271,7 @@ class PalletOps {
     for (final sub in ['pallets', 'photos']) {
       final s = await ref(o.id).collection(sub).get();
       for (final d in s.docs) {
+        if (sub == 'photos') await deleteStoredPhoto(d.data()['path']);
         await d.reference.delete();
       }
     }
@@ -278,16 +279,20 @@ class PalletOps {
   }
 
   static Future<void> addPhoto(PalletOrder o, Uint8List bytes) async {
+    final up = await uploadPhoto('palletOrders/${o.id}', bytes);
     await ref(o.id).collection('photos').add({
       't': Timestamp.now(),
       't2': DateTime.now().millisecondsSinceEpoch,
       'by': currentUser?.name ?? '',
-      'data': base64Encode(bytes),
+      'url': up['url'],
+      'path': up['path'],
     });
     await ref(o.id).update({'photoCount': FieldValue.increment(1)});
   }
 
   static Future<void> deletePhoto(PalletOrder o, String photoId) async {
+    final d = await ref(o.id).collection('photos').doc(photoId).get();
+    await deleteStoredPhoto(d.data()?['path']);
     await ref(o.id).collection('photos').doc(photoId).delete();
     await ref(o.id).update({'photoCount': FieldValue.increment(-1)});
   }
@@ -1088,22 +1093,12 @@ class PalletPhotos extends StatelessWidget {
           Wrap(spacing: 8, runSpacing: 8, children: [
             for (final d in docs)
               Builder(builder: (_) {
-                Uint8List? bytes;
-                try {
-                  bytes = base64Decode((d.data()['data'] ?? '').toString());
-                } catch (_) {}
-                if (bytes == null) return const SizedBox.shrink();
-                final img = bytes;
+                final url = (d.data()['url'] ?? '').toString();
+                final data = (d.data()['data'] ?? '').toString();
                 return Stack(children: [
                   GestureDetector(
-                    onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => Scaffold(
-                        backgroundColor: Colors.black,
-                        appBar: AppBar(backgroundColor: Colors.black),
-                        body: Center(child: InteractiveViewer(child: Image.memory(img))),
-                      ),
-                    )),
-                    child: ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.memory(img, width: 96, height: 96, fit: BoxFit.cover)),
+                    onTap: () => openStoredImage(context, url, data),
+                    child: ClipRRect(borderRadius: BorderRadius.circular(8), child: storedImage(url, data, width: 96, height: 96)),
                   ),
                   if (edit)
                     Positioned(

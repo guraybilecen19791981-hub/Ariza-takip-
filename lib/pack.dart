@@ -501,6 +501,7 @@ class PackOps {
     for (final sub in ['events', 'photos']) {
       final s = await ref(o.id).collection(sub).get();
       for (final d in s.docs) {
+        if (sub == 'photos') await deleteStoredPhoto(d.data()['path']);
         await d.reference.delete();
       }
     }
@@ -562,6 +563,7 @@ class PackOps {
   // Görseller
   static Future<void> addPhoto(PackOrder o, Uint8List bytes, String stage, List<String> approvers, String note) async {
     final now = DateTime.now();
+    final up = await uploadPhoto('packOrders/${o.id}', bytes);
     await ref(o.id).collection('photos').add({
       't': Timestamp.fromDate(now),
       't2': now.millisecondsSinceEpoch,
@@ -569,7 +571,8 @@ class PackOps {
       'byUid': currentUser?.uid ?? '',
       'stage': stage,
       'note': note,
-      'data': base64Encode(bytes),
+      'url': up['url'],
+      'path': up['path'],
       'approvers': approvers,
       'approvals': <String, dynamic>{},
       'status': approvers.isEmpty ? 'bilgi' : 'bekliyor',
@@ -631,6 +634,7 @@ class PackPhoto {
   final String stage;
   final String note;
   final String data;
+  final String url;
   final List<String> approvers;
   final Map<String, dynamic> approvals;
   final String status;
@@ -642,6 +646,7 @@ class PackPhoto {
     required this.stage,
     required this.note,
     required this.data,
+    this.url = '',
     required this.approvers,
     required this.approvals,
     required this.status,
@@ -658,6 +663,7 @@ class PackPhoto {
       stage: (m['stage'] ?? '').toString(),
       note: (m['note'] ?? '').toString(),
       data: (m['data'] ?? '').toString(),
+      url: (m['url'] ?? '').toString(),
       approvers: ap is List ? ap.map((e) => e.toString()).toList() : <String>[],
       approvals: al is Map ? Map<String, dynamic>.from(al) : <String, dynamic>{},
       status: (m['status'] ?? 'bilgi').toString(),
@@ -1730,30 +1736,10 @@ class PackPhotos extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   GestureDetector(
-                    onTap: () {
-                      Uint8List bytes;
-                      try {
-                        bytes = base64Decode(p.data);
-                      } catch (_) {
-                        return;
-                      }
-                      Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => Scaffold(
-                          backgroundColor: Colors.black,
-                          appBar: AppBar(backgroundColor: Colors.black),
-                          body: Center(child: InteractiveViewer(child: Image.memory(bytes))),
-                        ),
-                      ));
-                    },
+                    onTap: () => openStoredImage(context, p.url, p.data),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(8),
-                      child: Builder(builder: (_) {
-                        try {
-                          return Image.memory(base64Decode(p.data), width: 96, height: 96, fit: BoxFit.cover);
-                        } catch (_) {
-                          return const SizedBox(width: 96, height: 96);
-                        }
-                      }),
+                      child: storedImage(p.url, p.data, width: 96, height: 96),
                     ),
                   ),
                   const SizedBox(width: 10),

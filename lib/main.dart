@@ -8,6 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:excel/excel.dart' as xl;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -916,6 +917,62 @@ class Presence with WidgetsBindingObserver {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Fotoğraflar: yeni kayıtlar Cloud Storage'da (url + path), eski kayıtlar Firestore'da (base64 data)
+// ---------------------------------------------------------------------------
+
+Future<Map<String, String>> uploadPhoto(String folder, Uint8List bytes) async {
+  final path = 'photos/$folder/${DateTime.now().millisecondsSinceEpoch}_${math.Random().nextInt(1 << 30)}.jpg';
+  final ref = FirebaseStorage.instance.ref(path);
+  await ref.putData(bytes, SettableMetadata(contentType: 'image/jpeg'));
+  final url = await ref.getDownloadURL();
+  return {'url': url, 'path': path};
+}
+
+Future<void> deleteStoredPhoto(dynamic path) async {
+  final p = (path ?? '').toString();
+  if (p.isEmpty) return;
+  try {
+    await FirebaseStorage.instance.ref(p).delete();
+  } catch (_) {}
+}
+
+Widget storedImage(String url, String data, {double? width, double? height, BoxFit fit = BoxFit.cover}) {
+  Widget empty() => Container(
+        width: width,
+        height: height,
+        color: const Color(0xFFE9ECEF),
+        child: const Icon(Icons.broken_image_outlined, color: kMuted),
+      );
+  if (url.isNotEmpty) {
+    return Image.network(
+      url,
+      width: width,
+      height: height,
+      fit: fit,
+      errorBuilder: (_, __, ___) => empty(),
+      loadingBuilder: (c, child, p) => p == null
+          ? child
+          : SizedBox(width: width, height: height, child: const Center(child: CircularProgressIndicator(strokeWidth: 2))),
+    );
+  }
+  try {
+    return Image.memory(base64Decode(data), width: width, height: height, fit: fit);
+  } catch (_) {
+    return empty();
+  }
+}
+
+void openStoredImage(BuildContext context, String url, String data) {
+  Navigator.of(context).push(MaterialPageRoute(
+    builder: (_) => Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(backgroundColor: Colors.black),
+      body: Center(child: InteractiveViewer(child: storedImage(url, data, fit: BoxFit.contain))),
+    ),
+  ));
+}
+
 Future<void> signOut() async {
   await Presence.I.stop();
   await Watchers.stop();
@@ -1377,7 +1434,8 @@ class _NewFaultPageState extends State<NewFaultPage> {
         });
       });
       for (var i = 0; i < _photos.length; i++) {
-        await faultRef.collection('photos').doc('$i').set({'i': i, 'data': base64Encode(_photos[i])});
+        final up = await uploadPhoto('faults/${faultRef.id}', _photos[i]);
+        await faultRef.collection('photos').doc('$i').set({'i': i, 'url': up['url'], 'path': up['path']});
       }
       if (!mounted) return;
       Navigator.of(context).pop();
@@ -1686,28 +1744,17 @@ class PhotoStrip extends StatelessWidget {
       future: db.collection('faults').doc(faultId).collection('photos').orderBy('i').get(),
       builder: (context, snap) {
         if (!snap.hasData) return const SizedBox(height: 90, child: Center(child: CircularProgressIndicator()));
-        final images = <Uint8List>[];
-        for (final d in snap.data!.docs) {
-          try {
-            images.add(base64Decode((d.data()['data'] ?? '').toString()));
-          } catch (_) {}
-        }
+        final images = snap.data!.docs.map((d) => [(d.data()['url'] ?? '').toString(), (d.data()['data'] ?? '').toString()]).toList();
         return Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [
             for (final img in images)
               GestureDetector(
-                onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => Scaffold(
-                    backgroundColor: Colors.black,
-                    appBar: AppBar(backgroundColor: Colors.black),
-                    body: Center(child: InteractiveViewer(child: Image.memory(img))),
-                  ),
-                )),
+                onTap: () => openStoredImage(context, img[0], img[1]),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(10),
-                  child: Image.memory(img, width: 96, height: 96, fit: BoxFit.cover),
+                  child: storedImage(img[0], img[1], width: 96, height: 96),
                 ),
               ),
           ],
