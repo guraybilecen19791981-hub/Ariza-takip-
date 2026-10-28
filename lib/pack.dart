@@ -49,6 +49,9 @@ class PackOrder {
   final String productCode;
   final String workType;
   final int perBox;
+  final double perBoxKg;
+  final double totalKg;
+  final double todayKg;
   final String ownerUid;
   final String ownerName;
   final String status; // calisiyor | durdu | beklemede | bitti
@@ -77,6 +80,9 @@ class PackOrder {
     required this.productCode,
     required this.workType,
     required this.perBox,
+    this.perBoxKg = 0,
+    this.totalKg = 0,
+    this.todayKg = 0,
     required this.ownerUid,
     required this.ownerName,
     required this.status,
@@ -113,6 +119,9 @@ class PackOrder {
       productCode: (m['productCode'] ?? '').toString(),
       workType: (m['workType'] ?? '').toString(),
       perBox: _toInt(m['perBox']),
+      perBoxKg: _dbl(m['perBoxKg']),
+      totalKg: _dbl(m['totalKg']),
+      todayKg: _dbl(m['todayKg']),
       ownerUid: (m['ownerUid'] ?? '').toString(),
       ownerName: (m['ownerName'] ?? '').toString(),
       status: (m['status'] ?? 'calisiyor').toString(),
@@ -144,8 +153,8 @@ class PackOrder {
 
   int get remUnits => perBox > 0 ? totalUnits - totalBoxes * perBox : 0;
   int get todayRem => perBox > 0 ? todayUnits - todayBoxes * perBox : 0;
-  String get qtyText => remUnits > 0 ? '$totalBoxes koli + $remUnits adet' : '$totalBoxes koli';
-  String get todayText => todayRem > 0 ? '$todayBoxes koli + $todayRem adet' : '$todayBoxes koli';
+  String get qtyText => '${remUnits > 0 ? '$totalBoxes koli + $remUnits adet' : '$totalBoxes koli'}${totalKg > 0 ? ' · ${fmtQty(totalKg)} kg' : ''}';
+  String get todayText => '${todayRem > 0 ? '$todayBoxes koli + $todayRem adet' : '$todayBoxes koli'}${todayKg > 0 ? ' · ${fmtQty(todayKg)} kg' : ''}';
 
   String get statusLabel {
     if (isFinished) return 'Bitti';
@@ -189,6 +198,7 @@ class PackEvent {
   final int? workers;
   final int? daily;
   final bool edited;
+  final double? boxKg;
 
   PackEvent({
     required this.id,
@@ -202,6 +212,7 @@ class PackEvent {
     required this.workers,
     required this.daily,
     required this.edited,
+    this.boxKg,
   });
 
   factory PackEvent.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -218,6 +229,7 @@ class PackEvent {
       workers: m['workers'] is num ? (m['workers'] as num).toInt() : null,
       daily: m['daily'] is num ? (m['daily'] as num).toInt() : null,
       edited: m['editedBy'] != null,
+      boxKg: m['boxKg'] is num ? (m['boxKg'] as num).toDouble() : null,
     );
   }
 
@@ -232,6 +244,12 @@ class PackEvent {
     }
     return text;
   }
+}
+
+// Koli içi kg ile eklenen toplam kg (artan adetler koli içi adede oranlanır)
+double entryKg(int boxes, int units, int perBox, double boxKg) {
+  if (boxKg <= 0) return 0;
+  return boxes * boxKg + (perBox > 0 ? units * boxKg / perBox : 0);
 }
 
 class PackOps {
@@ -271,6 +289,7 @@ class PackOps {
     required int perBox,
     required int workers,
     required int daily,
+    double perBoxKg = 0,
   }) async {
     final me = currentUser!;
     final now = DateTime.now();
@@ -280,6 +299,9 @@ class PackOps {
       'productCode': productCode,
       'workType': workType,
       'perBox': perBox,
+      'perBoxKg': perBoxKg,
+      'totalKg': 0,
+      'todayKg': 0,
       'ownerUid': me.uid,
       'ownerName': me.name,
       'status': 'calisiyor',
@@ -309,9 +331,16 @@ class PackOps {
     return doc.id;
   }
 
-  static Future<void> addEntry(PackOrder o, int boxes, int units) async {
+  static Future<void> addEntry(PackOrder o, int boxes, int units, [double? boxKg]) async {
     final now = DateTime.now();
+    final bk = boxKg ?? o.perBoxKg;
+    final kg = entryKg(boxes, units, o.perBox, bk);
     final data = <String, dynamic>{'lastUpdateAt': Timestamp.fromDate(now)};
+    if (kg > 0) {
+      data['totalKg'] = FieldValue.increment(kg);
+      data['todayKg'] = FieldValue.increment(kg);
+    }
+    if (bk != o.perBoxKg) data['perBoxKg'] = bk;
     if (o.perBox > 0) {
       final add = boxes * o.perBox + units;
       final tu = o.totalUnits + add;
@@ -325,7 +354,7 @@ class PackOps {
       data['todayBoxes'] = FieldValue.increment(boxes);
     }
     await ref(o.id).update(data);
-    await _addEvent(o.id, _event('koli', '', {'qty': boxes, 'units': units}, now));
+    await _addEvent(o.id, _event('koli', '', {'qty': boxes, 'units': units, 'boxKg': bk, 'kg': kg}, now));
   }
 
   static Future<void> stop(PackOrder o, String reason, String note) async {
@@ -392,6 +421,7 @@ class PackOps {
       'daily': daily,
       'todayBoxes': 0,
       'todayUnits': 0,
+      'todayKg': 0,
       'todayStartAt': Timestamp.fromDate(now),
       'dayCount': FieldValue.increment(1),
       'lastUpdateAt': Timestamp.fromDate(now),
@@ -421,16 +451,18 @@ class PackOps {
     await _addEvent(o.id, _event('not', 'Not: $note'));
   }
 
-  static Future<void> editOrder(PackOrder o, String orderNo, String productCode, String workType, int perBox) async {
+  static Future<void> editOrder(PackOrder o, String orderNo, String productCode, String workType, int perBox, [double? perBoxKg]) async {
     final changes = <String>[];
     if (orderNo != o.orderNo) changes.add('Sipariş no ${o.orderNo} → $orderNo');
     if (productCode != o.productCode) changes.add('Ürün kodu ${o.productCode} → $productCode');
     if (workType != o.workType) changes.add('İş türü → ${kWorkTypes[workType] ?? workType}');
     if (perBox != o.perBox) changes.add('Koli içi adet ${o.perBox} → $perBox');
+    final pk = perBoxKg ?? o.perBoxKg;
+    if (pk != o.perBoxKg) changes.add('Koli içi kg ${fmtQty(o.perBoxKg)} → ${fmtQty(pk)}');
     if (changes.isEmpty) return;
-    await ref(o.id).update({'orderNo': orderNo, 'productCode': productCode, 'workType': workType, 'perBox': perBox});
+    await ref(o.id).update({'orderNo': orderNo, 'productCode': productCode, 'workType': workType, 'perBox': perBox, 'perBoxKg': pk});
     await _addEvent(o.id, _event('duzenle', 'Düzenlendi: ${changes.join(', ')}'));
-    if (perBox != o.perBox) await recompute(o.id);
+    if (perBox != o.perBox || pk != o.perBoxKg) await recompute(o.id);
   }
 
   // Siparişin başlangıç / bitiş saatini düzeltir (ilgili hareketlerin saatini değiştirir)
@@ -486,6 +518,7 @@ class PackOps {
     if (e.isEntry) {
       data['qty'] = qty;
       data['units'] = units;
+      data['kg'] = entryKg(qty, units, o.perBox, (e.boxKg == null || e.boxKg == 0) ? o.perBoxKg : e.boxKg!);
     }
     await ref(o.id).collection('events').doc(e.id).update(data);
     await recompute(o.id);
@@ -516,6 +549,8 @@ class PackOps {
     final events = evSnap.docs.map((d) => PackEvent.fromDoc(d)).toList();
     int total = 0;
     int today = 0;
+    double totalKg = 0;
+    double todayKg = 0;
     final stopMin = <String, int>{};
     DateTime? openAt;
     String openReason = 'diger';
@@ -532,6 +567,10 @@ class PackOps {
         final v = o.perBox > 0 ? e.qty * o.perBox + e.units : e.qty;
         total += v;
         if (dayKey(at) == o.currentDay) today += v;
+        // Koli içi kg girilmemiş eski kayıtlar siparişin koli içi kg değerini kullanır
+        final kg = entryKg(e.qty, e.units, o.perBox, (e.boxKg == null || e.boxKg == 0) ? o.perBoxKg : e.boxKg!);
+        totalKg += kg;
+        if (dayKey(at) == o.currentDay) todayKg += kg;
       } else if (e.type == 'dur') {
         openAt = at;
         openReason = e.reasonKey ?? 'diger';
@@ -541,7 +580,7 @@ class PackOps {
         openAt = null;
       }
     }
-    final data = <String, dynamic>{'stopMin': stopMin, 'lastUpdateAt': Timestamp.now()};
+    final data = <String, dynamic>{'stopMin': stopMin, 'lastUpdateAt': Timestamp.now(), 'totalKg': totalKg, 'todayKg': todayKg};
     if (firstAt != null) data['createdAt'] = Timestamp.fromDate(firstAt);
     if (lastStartToday != null) data['todayStartAt'] = Timestamp.fromDate(lastStartToday);
     if (o.status == 'durdu' && openAt != null) data['stopStartedAt'] = Timestamp.fromDate(openAt);
@@ -950,6 +989,7 @@ class _NewPackPageState extends State<NewPackPage> {
   final _order = TextEditingController();
   final _product = TextEditingController();
   final _perBox = TextEditingController();
+  final _perBoxKg = TextEditingController();
   final _workers = TextEditingController();
   final _daily = TextEditingController(text: '0');
   String? _type;
@@ -980,6 +1020,7 @@ class _NewPackPageState extends State<NewPackPage> {
         perBox: perBox,
         workers: workers,
         daily: daily,
+        perBoxKg: double.tryParse(_perBoxKg.text.trim().replaceAll(',', '.')) ?? 0,
       );
       if (!mounted) return;
       Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => PackDetailPage(orderId: id)));
@@ -1022,6 +1063,12 @@ class _NewPackPageState extends State<NewPackPage> {
             decoration: const InputDecoration(labelText: 'Koli içi adet (isteğe bağlı)', helperText: 'Girilirse koli yerine adet de girebilirsiniz'),
           ),
           const SizedBox(height: 12),
+          TextField(
+            controller: _perBoxKg,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(labelText: 'Koli içi kg (isteğe bağlı)', helperText: 'Girilirse koli sayısıyla çarpılıp toplam kg hesaplanır'),
+          ),
+          const SizedBox(height: 12),
           Row(children: [
             Expanded(child: TextField(controller: _workers, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Çalışan sayısı'))),
             const SizedBox(width: 12),
@@ -1044,64 +1091,86 @@ class _NewPackPageState extends State<NewPackPage> {
 // Diyaloglar
 // ---------------------------------------------------------------------------
 
-Future<List<int>?> askEntry(BuildContext context, PackOrder o) {
+Future<(int, int, double)?> askEntry(BuildContext context, PackOrder o) {
   final c = TextEditingController();
+  final kgc = TextEditingController(text: o.perBoxKg > 0 ? fmtQty(o.perBoxKg).replaceAll('.', '') : '');
   bool units = false;
-  return showDialog<List<int>>(
+  return showDialog<(int, int, double)>(
     context: context,
     builder: (d) => StatefulBuilder(
-      builder: (d, setS) => AlertDialog(
-        title: Text(units ? 'Kaç adet eklendi?' : 'Kaç koli eklendi?'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (o.perBox > 0)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: SegmentedButton<bool>(
-                  segments: const [
-                    ButtonSegment<bool>(value: false, label: Text('Koli')),
-                    ButtonSegment<bool>(value: true, label: Text('Adet')),
-                  ],
-                  selected: <bool>{units},
-                  onSelectionChanged: (s) => setS(() => units = s.first),
-                ),
-              ),
-            TextField(
-              controller: c,
-              autofocus: true,
-              keyboardType: TextInputType.number,
-              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w600),
-              textAlign: TextAlign.center,
-              decoration: const InputDecoration(hintText: '0'),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
+      builder: (d, setS) {
+        final n = int.tryParse(c.text.trim()) ?? 0;
+        final bk = double.tryParse(kgc.text.trim().replaceAll(',', '.')) ?? 0;
+        final kg = units ? entryKg(0, n, o.perBox, bk) : entryKg(n, 0, o.perBox, bk);
+        return AlertDialog(
+          title: Text(units ? 'Kaç adet eklendi?' : 'Kaç koli eklendi?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                for (final n in const [10, 20, 50, 100]) ActionChip(label: Text('+$n'), onPressed: () => c.text = '$n'),
+                if (o.perBox > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: SegmentedButton<bool>(
+                      segments: const [
+                        ButtonSegment<bool>(value: false, label: Text('Koli')),
+                        ButtonSegment<bool>(value: true, label: Text('Adet')),
+                      ],
+                      selected: <bool>{units},
+                      onSelectionChanged: (s) => setS(() => units = s.first),
+                    ),
+                  ),
+                TextField(
+                  controller: c,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w600),
+                  textAlign: TextAlign.center,
+                  decoration: const InputDecoration(hintText: '0'),
+                  onChanged: (_) => setS(() {}),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final v in const [10, 20, 50, 100]) ActionChip(label: Text('+$v'), onPressed: () => setS(() => c.text = '$v')),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: kgc,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: 'Koli içi kg (isteğe bağlı)', isDense: true),
+                  onChanged: (_) => setS(() {}),
+                ),
+                if (kg > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text('Bu giriş: ${fmtQty(kg)} kg', style: const TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                if (units && o.perBox > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text('Koli içi ${o.perBox} adet; toplam otomatik koliye çevrilir.', style: const TextStyle(color: kMuted, fontSize: 13)),
+                  ),
               ],
             ),
-            if (units && o.perBox > 0)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text('Koli içi ${o.perBox} adet; toplam otomatik koliye çevrilir.', style: const TextStyle(color: kMuted, fontSize: 13)),
-              ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Vazgeç')),
-          FilledButton(
-            onPressed: () {
-              final n = int.tryParse(c.text.trim());
-              if (n == null || n <= 0) return;
-              Navigator.pop(d, units ? <int>[0, n] : <int>[n, 0]);
-            },
-            child: const Text('Ekle'),
           ),
-        ],
-      ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(d), child: const Text('Vazgeç')),
+            FilledButton(
+              onPressed: () {
+                final v = int.tryParse(c.text.trim());
+                if (v == null || v <= 0) return;
+                final bkv = double.tryParse(kgc.text.trim().replaceAll(',', '.')) ?? 0;
+                Navigator.pop(d, units ? (0, v, bkv) : (v, 0, bkv));
+              },
+              child: const Text('Ekle'),
+            ),
+          ],
+        );
+      },
     ),
   );
 }
@@ -1213,6 +1282,7 @@ Future<void> editOrderDialog(BuildContext context, PackOrder o) async {
   final order = TextEditingController(text: o.orderNo);
   final product = TextEditingController(text: o.productCode);
   final perBox = TextEditingController(text: o.perBox > 0 ? '${o.perBox}' : '');
+  final perBoxKg = TextEditingController(text: o.perBoxKg > 0 ? '${o.perBoxKg}' : '');
   String type = kWorkTypes.containsKey(o.workType) ? o.workType : 'uretim';
   DateTime start = o.createdAt ?? DateTime.now();
   DateTime finish = o.finishedAt ?? DateTime.now();
@@ -1237,6 +1307,12 @@ Future<void> editOrderDialog(BuildContext context, PackOrder o) async {
               TextField(controller: product, decoration: const InputDecoration(labelText: 'Ürün kodu')),
               const SizedBox(height: 10),
               TextField(controller: perBox, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Koli içi adet')),
+              const SizedBox(height: 10),
+              TextField(
+                controller: perBoxKg,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(labelText: 'Koli içi kg', helperText: 'Kg girilmemiş eski koli girişlerine de uygulanır'),
+              ),
               const SizedBox(height: 14),
               SizedBox(
                 width: double.infinity,
@@ -1280,7 +1356,7 @@ Future<void> editOrderDialog(BuildContext context, PackOrder o) async {
     return;
   }
   try {
-    await PackOps.editOrder(o, order.text.trim(), product.text.trim(), type, pb);
+    await PackOps.editOrder(o, order.text.trim(), product.text.trim(), type, pb, double.tryParse(perBoxKg.text.trim().replaceAll(',', '.')) ?? 0);
     await PackOps.setTimes(o, start, o.isFinished ? finish : null);
     toast('Kaydedildi');
   } catch (e) {
@@ -1645,7 +1721,7 @@ class PackDetailPage extends StatelessWidget {
           onPressed: () async {
             final r = await askEntry(context, o);
             if (r == null) return;
-            await _run(() => PackOps.addEntry(o, r[0], r[1]));
+            await _run(() => PackOps.addEntry(o, r.$1, r.$2, r.$3));
           },
           icon: const Icon(Icons.add_box),
           label: Text(o.perBox > 0 ? 'Koli / adet gir' : 'Koli gir'),
@@ -1870,11 +1946,11 @@ Future<void> exportPackExcel() async {
     final reasonKeys = kStopReasons.keys.toList();
     s1.appendRow(<xl.CellValue?>[
       t('Sipariş no'), t('Ürün kodu'), t('İş türü'), t('Sorumlu'), t('Başlangıç'), t('Bitiş'), t('Durum'),
-      t('Toplam koli'), t('Artan adet'), t('Koli içi adet'), t('Gün sayısı'), t('Son güncelleme'), t('Bitiş notu'),
+      t('Toplam koli'), t('Artan adet'), t('Koli içi adet'), t('Koli içi kg'), t('Toplam kg'), t('Gün sayısı'), t('Son güncelleme'), t('Bitiş notu'),
       for (final k in reasonKeys) t('${kStopReasons[k]} (dk)'),
     ]);
     s2.appendRow(<xl.CellValue?>[
-      t('Sipariş no'), t('Ürün kodu'), t('İş türü'), t('Tarih saat'), t('İşlem'), t('Eklenen koli'), t('Eklenen adet'),
+      t('Sipariş no'), t('Ürün kodu'), t('İş türü'), t('Tarih saat'), t('İşlem'), t('Eklenen koli'), t('Eklenen adet'), t('Eklenen kg'),
       t('Toplam koli'), t('Çalışan'), t('Günlükçü'), t('Duruş nedeni'), t('Duruş (dk)'), t('Giren'), t('Düzenlendi'),
     ]);
 
@@ -1882,7 +1958,8 @@ Future<void> exportPackExcel() async {
       final o = PackOrder.fromDoc(d);
       s1.appendRow(<xl.CellValue?>[
         t(o.orderNo), t(o.productCode), t(o.workTypeLabel), t(o.ownerName), t(fmtFull(o.createdAt)), t(fmtFull(o.finishedAt)), t(o.statusLabel),
-        n(o.totalBoxes), n(o.remUnits), n(o.perBox), n(o.dayCount), t(fmtFull(o.lastUpdateAt)), t(o.finishNote),
+        n(o.totalBoxes), n(o.remUnits), n(o.perBox), xl.DoubleCellValue(o.perBoxKg), xl.DoubleCellValue((o.totalKg * 100).round() / 100), n(o.dayCount),
+        t(fmtFull(o.lastUpdateAt)), t(o.finishNote),
         for (final k in reasonKeys) n(o.stopMin[k] ?? 0),
       ]);
       final ev = await PackOps.ref(o.id).collection('events').orderBy('t2').get();
@@ -1898,6 +1975,9 @@ Future<void> exportPackExcel() async {
           t(o.orderNo), t(o.productCode), t(o.workTypeLabel), t(fmtFull(pe.t)), t(pe.displayText),
           pe.isEntry ? n(pe.qty) : null,
           pe.isEntry && pe.units != 0 ? n(pe.units) : null,
+          pe.isEntry
+              ? xl.DoubleCellValue((entryKg(pe.qty, pe.units, o.perBox, (pe.boxKg == null || pe.boxKg == 0) ? o.perBoxKg : pe.boxKg!) * 100).round() / 100)
+              : null,
           pe.isEntry ? n(runningBoxes) : null,
           pe.workers == null ? null : n(pe.workers!),
           pe.daily == null ? null : n(pe.daily!),
