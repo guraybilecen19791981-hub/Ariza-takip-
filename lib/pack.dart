@@ -563,7 +563,7 @@ class PackOps {
   // Görseller
   static Future<void> addPhoto(PackOrder o, Uint8List bytes, String stage, List<String> approvers, String note) async {
     final now = DateTime.now();
-    final up = await uploadPhoto('packOrders/${o.id}', bytes);
+    final up = await photoFields('packOrders/${o.id}', bytes);
     await ref(o.id).collection('photos').add({
       't': Timestamp.fromDate(now),
       't2': now.millisecondsSinceEpoch,
@@ -571,8 +571,7 @@ class PackOps {
       'byUid': currentUser?.uid ?? '',
       'stage': stage,
       'note': note,
-      'url': up['url'],
-      'path': up['path'],
+      ...up,
       'approvers': approvers,
       'approvals': <String, dynamic>{},
       'status': approvers.isEmpty ? 'bilgi' : 'bekliyor',

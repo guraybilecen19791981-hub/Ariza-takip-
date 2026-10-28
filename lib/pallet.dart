@@ -279,13 +279,12 @@ class PalletOps {
   }
 
   static Future<void> addPhoto(PalletOrder o, Uint8List bytes) async {
-    final up = await uploadPhoto('palletOrders/${o.id}', bytes);
+    final up = await photoFields('palletOrders/${o.id}', bytes);
     await ref(o.id).collection('photos').add({
       't': Timestamp.now(),
       't2': DateTime.now().millisecondsSinceEpoch,
       'by': currentUser?.name ?? '',
-      'url': up['url'],
-      'path': up['path'],
+      ...up,
     });
     await ref(o.id).update({'photoCount': FieldValue.increment(1)});
   }
@@ -1085,8 +1084,8 @@ class PalletPhotos extends StatelessWidget {
         final docs = snap.hasData ? snap.data!.docs : <QueryDocumentSnapshot<Map<String, dynamic>>>[];
         return _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Expanded(child: Text('Görseller (${docs.length}/3)', style: const TextStyle(fontWeight: FontWeight.w600))),
-            if (edit && docs.length < 3)
+            Expanded(child: Text('Görseller (${docs.length}/$kMaxPhotos)', style: const TextStyle(fontWeight: FontWeight.w600))),
+            if (edit && docs.length < kMaxPhotos)
               TextButton.icon(onPressed: () => _add(context), icon: const Icon(Icons.add_a_photo), label: const Text('Ekle')),
           ]),
           if (docs.isEmpty) const Text('Görsel yok.', style: TextStyle(color: kMuted)),

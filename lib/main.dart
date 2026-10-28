@@ -25,6 +25,7 @@ part 'machine.dart';
 // ---------------------------------------------------------------------------
 
 const String kAdminEmail = 'guraybilecen19791981@gmail.com';
+const int kMaxPhotos = 30; // kayıt başına en fazla görsel
 
 const FirebaseOptions kFirebaseOptions = FirebaseOptions(
   apiKey: 'AIzaSyD1W2Y4eH-OfoZH5GK7L1CpzP1SxiAhGEM',
@@ -929,6 +930,16 @@ Future<Map<String, String>> uploadPhoto(String folder, Uint8List bytes) async {
   return {'url': url, 'path': path};
 }
 
+// Storage açıksa oraya yükler; açık değilse (ücretsiz plan) eskisi gibi veritabanına kaydeder
+Future<Map<String, dynamic>> photoFields(String folder, Uint8List bytes) async {
+  try {
+    final up = await uploadPhoto(folder, bytes).timeout(const Duration(seconds: 25));
+    return {'url': up['url'], 'path': up['path']};
+  } catch (_) {
+    return {'data': base64Encode(bytes)};
+  }
+}
+
 Future<void> deleteStoredPhoto(dynamic path) async {
   final p = (path ?? '').toString();
   if (p.isEmpty) return;
@@ -1434,8 +1445,8 @@ class _NewFaultPageState extends State<NewFaultPage> {
         });
       });
       for (var i = 0; i < _photos.length; i++) {
-        final up = await uploadPhoto('faults/${faultRef.id}', _photos[i]);
-        await faultRef.collection('photos').doc('$i').set({'i': i, 'url': up['url'], 'path': up['path']});
+        final up = await photoFields('faults/${faultRef.id}', _photos[i]);
+        await faultRef.collection('photos').doc('$i').set({'i': i, ...up});
       }
       if (!mounted) return;
       Navigator.of(context).pop();
@@ -1477,7 +1488,7 @@ class _NewFaultPageState extends State<NewFaultPage> {
                 decoration: const InputDecoration(hintText: 'Ne oldu? Ses, koku, hata kodu…'),
               ),
               const SizedBox(height: 16),
-              const Text('Fotoğraf (varsa, en fazla 3)', style: TextStyle(fontWeight: FontWeight.w600)),
+              const Text('Fotoğraf (varsa, en fazla $kMaxPhotos)', style: TextStyle(fontWeight: FontWeight.w600)),
               const SizedBox(height: 6),
               Wrap(
                 spacing: 8,
@@ -1501,7 +1512,7 @@ class _NewFaultPageState extends State<NewFaultPage> {
                         ),
                       ],
                     ),
-                  if (_photos.length < 3)
+                  if (_photos.length < kMaxPhotos)
                     InkWell(
                       onTap: _addPhoto,
                       borderRadius: BorderRadius.circular(10),
