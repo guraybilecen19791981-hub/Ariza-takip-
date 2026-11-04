@@ -63,7 +63,57 @@ const List<String> kPermLevels = ['yok', 'gor', 'gir', 'yonet'];
 const Map<String, String> kPermLabels = {'yok': 'Yok', 'gor': 'Görür', 'gir': 'Girer / düzenler', 'yonet': 'Yönetir / onaylar'};
 const Map<String, String> kModules = {'ariza': 'Arıza', 'paketleme': 'Paketleme', 'paletleme': 'Paletleme', 'hat': 'Makine takip', 'rapor': 'Raporlar / Excel'};
 
+// ---------------------------------------------------------------------------
+// Özel roller (web panelinden ya da uygulamadan admin tanımlar; config/roles belgesinde)
+// ---------------------------------------------------------------------------
+class CustomRole {
+  final String key;
+  final String label;
+  final Map<String, String> perms;
+  final bool approver; // paketlemede görsel onayı verebilir
+  final bool packAlerts; // paketleme duruş uyarısı alır
+  const CustomRole(this.key, this.label, this.perms, this.approver, this.packAlerts);
+
+  factory CustomRole.fromMap(dynamic m) {
+    final x = (m is Map) ? m : <String, dynamic>{};
+    final p = <String, String>{for (final k in kModules.keys) k: 'yok'};
+    final raw = x['perms'];
+    if (raw is Map) raw.forEach((k, v) => p[k.toString()] = v.toString());
+    return CustomRole((x['key'] ?? '').toString(), (x['label'] ?? '').toString(), p, x['approver'] == true, x['packAlerts'] == true);
+  }
+
+  Map<String, dynamic> toMap() => {'key': key, 'label': label, 'perms': perms, 'approver': approver, 'packAlerts': packAlerts};
+}
+
+Map<String, CustomRole> gCustomRoles = {};
+final ValueNotifier<int> roleVersion = ValueNotifier<int>(0);
+StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _roleSub;
+
+void ensureRoleListener() {
+  _roleSub ??= db.collection('config').doc('roles').snapshots().listen((s) {
+    final raw = s.data()?['items'];
+    final m = <String, CustomRole>{};
+    if (raw is List) {
+      for (final e in raw) {
+        final r = CustomRole.fromMap(e);
+        if (r.key.isNotEmpty) m[r.key] = r;
+      }
+    }
+    gCustomRoles = m;
+    roleVersion.value++;
+  }, onError: (_) {});
+}
+
+Map<String, String> allRoleLabels() => {...kRoleLabels, for (final r in gCustomRoles.values) r.key: r.label};
+
+Map<String, dynamic> roleFlags(String role) {
+  final c = gCustomRoles[role];
+  return {'approver': c?.approver ?? false, 'packAlerts': c?.packAlerts ?? false};
+}
+
 Map<String, String> defaultPerms(String role) {
+  final custom = gCustomRoles[role];
+  if (custom != null) return Map<String, String>.from(custom.perms);
   Map<String, String> p(String a, String pk, String pl, String h, String r) => {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'rapor': r};
   switch (role) {
     case 'admin':
@@ -188,6 +238,8 @@ class AppUser {
   final String role;
   final bool alarm;
   final bool machineAlarm;
+  final bool approverFlag;
+  final bool packAlertsFlag;
   final List<String> lines;
   final Map<String, String> perms;
   final DateTime? lastSeen;
@@ -201,6 +253,8 @@ class AppUser {
     required this.role,
     required this.alarm,
     this.machineAlarm = false,
+    this.approverFlag = false,
+    this.packAlertsFlag = false,
     this.lines = const [],
     required this.perms,
     this.lastSeen,
@@ -232,6 +286,8 @@ class AppUser {
       role: role,
       alarm: m['alarm'] == true,
       machineAlarm: m['machineAlarm'] == true,
+      approverFlag: m['approver'] == true,
+      packAlertsFlag: m['packAlerts'] == true,
       lines: (m['lines'] is List) ? (m['lines'] as List).map((e) => e.toString()).toList() : const <String>[],
       perms: perms,
       lastSeen: m['lastSeen'] is Timestamp ? (m['lastSeen'] as Timestamp).toDate() : null,
@@ -244,9 +300,10 @@ class AppUser {
   bool can(String module, String level) => permRank(perm(module)) >= permRank(level);
   bool get isAdmin => role == 'admin';
   bool get getsAlarm => role == 'sef' || alarm;
-  bool get getsPackAlerts => role == 'kalite' || role == 'vardiya' || role == 'admin' || role == 'ihracat' || role == 'planlama';
+  bool get getsPackAlerts =>
+      role == 'kalite' || role == 'vardiya' || role == 'admin' || role == 'ihracat' || role == 'planlama' || packAlertsFlag || approverFlag;
   bool get canManage => role == 'sef' || role == 'admin' || can('ariza', 'yonet');
-  String get roleLabel => kRoleLabels[role] ?? role;
+  String get roleLabel => allRoleLabels()[role] ?? role;
 }
 
 class Fault {
@@ -508,7 +565,7 @@ class Watchers {
   static final Set<String> _seen = <String>{};
 
   static Future<void> ensure(AppUser u) async {
-    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}';
+    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}';
     if (key == _key) return;
     await stop();
     _key = key;
@@ -561,7 +618,7 @@ class Watchers {
               'Sipariş ${m['orderNo'] ?? ''} · ${m['productCode'] ?? ''} · ${m['by'] ?? ''}',
             );
           } else {
-            if (!(u.role == 'kalite' || u.role == 'vardiya' || u.isAdmin)) continue;
+            if (!(u.role == 'kalite' || u.role == 'vardiya' || u.isAdmin || u.packAlertsFlag)) continue;
             Notifier.packAlert(
               (m['orderId'] ?? '').toString(),
               'Paketleme durdu: ${m['reasonLabel'] ?? ''}',
@@ -1057,6 +1114,7 @@ class _HomePageState extends State<HomePage> {
         await Notifier.requestPermissions();
         if (widget.me.role == 'admin') await ensureMachines();
       }
+      ensureRoleListener();
       await Watchers.ensure(widget.me);
       Presence.I.start(widget.me.uid);
       final p = pendingFaultId;
@@ -2103,6 +2161,10 @@ class UsersView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(valueListenable: roleVersion, builder: (context, _, __) => _build(context));
+  }
+
+  Widget _build(BuildContext context) {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: db.collection('users').snapshots(),
       builder: (context, snap) {
@@ -2116,12 +2178,22 @@ class UsersView extends StatelessWidget {
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
           children: [
-            FilledButton.icon(
-              style: FilledButton.styleFrom(backgroundColor: kDark),
-              onPressed: () => showCreateUserDialog(context),
-              icon: const Icon(Icons.person_add),
-              label: const Text('Yeni kullanıcı ekle'),
-            ),
+            Row(children: [
+              Expanded(
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(backgroundColor: kDark),
+                  onPressed: () => showCreateUserDialog(context),
+                  icon: const Icon(Icons.person_add),
+                  label: const Text('Yeni kullanıcı ekle'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const RolesPage())),
+                icon: const Icon(Icons.badge_outlined),
+                label: const Text('Roller'),
+              ),
+            ]),
             const SizedBox(height: 10),
             const Text(
               'Kullanıcıyı buradan ekleyebilir ya da kişi telefondan "Yeni hesap oluştur" ile kayıt olabilir. '
@@ -2174,9 +2246,10 @@ class UsersView extends StatelessWidget {
                       children: [
                         Expanded(
                           child: DropdownButtonFormField<String>(
-                            value: kRoleLabels.containsKey(u.role) ? u.role : 'bekliyor',
+                            value: allRoleLabels().containsKey(u.role) ? u.role : 'bekliyor',
+                            isExpanded: true,
                             decoration: const InputDecoration(labelText: 'Rol', isDense: true),
-                            items: kRoleLabels.entries
+                            items: allRoleLabels().entries
                                 .map((e) => DropdownMenuItem<String>(value: e.key, child: Text(e.value)))
                                 .toList(),
                             onChanged: (v) {
@@ -2185,7 +2258,7 @@ class UsersView extends StatelessWidget {
                                 toast('Kendi admin rolünüzü kaldıramazsınız.');
                                 return;
                               }
-                              db.collection('users').doc(u.uid).update({'role': v, 'perms': defaultPerms(v)});
+                              db.collection('users').doc(u.uid).update({'role': v, 'perms': defaultPerms(v), ...roleFlags(v)});
                             },
                           ),
                         ),
@@ -2348,6 +2421,7 @@ Future<void> createUserByAdmin(String name, String email, String pass, String ro
     'role': role,
     'alarm': false,
     'perms': defaultPerms(role),
+    ...roleFlags(role),
     'createdAt': FieldValue.serverTimestamp(),
   });
 }
@@ -2377,7 +2451,7 @@ Future<void> showCreateUserDialog(BuildContext context) async {
                 value: role,
                 isExpanded: true,
                 decoration: const InputDecoration(labelText: 'Rol'),
-                items: kRoleLabels.entries
+                items: allRoleLabels().entries
                     .where((e) => e.key != 'bekliyor')
                     .map((e) => DropdownMenuItem<String>(value: e.key, child: Text(e.value)))
                     .toList(),
@@ -2415,4 +2489,162 @@ Future<void> showCreateUserDialog(BuildContext context) async {
       ),
     ),
   );
+}
+
+
+// ---------------------------------------------------------------------------
+// Roller sayfası (admin): özel rol ekle / düzenle / sil
+// ---------------------------------------------------------------------------
+class RolesPage extends StatelessWidget {
+  const RolesPage({super.key});
+
+  static Future<void> save(List<CustomRole> list) =>
+      db.collection('config').doc('roles').set({'items': list.map((r) => r.toMap()).toList()});
+
+  // Roldeki kullanıcıların onay / uyarı ayarını (ve istenirse yetkilerini) günceller
+  static Future<int> applyToUsers(CustomRole r, {required bool perms}) async {
+    final s = await db.collection('users').where('role', isEqualTo: r.key).get();
+    for (final d in s.docs) {
+      await d.reference.update({'approver': r.approver, 'packAlerts': r.packAlerts, if (perms) 'perms': r.perms});
+    }
+    return s.docs.length;
+  }
+
+  Future<void> _edit(BuildContext context, CustomRole? r) async {
+    final name = TextEditingController(text: r?.label ?? '');
+    final perms = Map<String, String>.from(r?.perms ?? {for (final k in kModules.keys) k: 'gor'});
+    bool approver = r?.approver ?? false;
+    bool alerts = r?.packAlerts ?? false;
+    bool applyPerms = false;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => StatefulBuilder(
+        builder: (d, setS) => AlertDialog(
+          title: Text(r == null ? 'Yeni rol' : 'Rolü düzenle'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              TextField(controller: name, autofocus: r == null, decoration: const InputDecoration(labelText: 'Rol adı (ör. Ambar sorumlusu)')),
+              const SizedBox(height: 12),
+              const Text('Varsayılan panel yetkileri', style: TextStyle(fontWeight: FontWeight.w600)),
+              for (final mod in kModules.entries)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: DropdownButtonFormField<String>(
+                    value: perms[mod.key] ?? 'yok',
+                    isExpanded: true,
+                    decoration: InputDecoration(labelText: mod.value, isDense: true),
+                    items: kPermLevels.map((l) => DropdownMenuItem<String>(value: l, child: Text(kPermLabels[l] ?? l))).toList(),
+                    onChanged: (v) => setS(() => perms[mod.key] = v ?? 'yok'),
+                  ),
+                ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Paketlemede görsel onayı verebilir'),
+                value: approver,
+                onChanged: (v) => setS(() => approver = v),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Paketleme duruş uyarısı alır'),
+                subtitle: const Text('Ürün yok / kalite onayı duruşlarında bildirim'),
+                value: alerts,
+                onChanged: (v) => setS(() => alerts = v),
+              ),
+              if (r != null)
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Bu roldeki kullanıcıların yetkilerini de bu ayarlara çek'),
+                  value: applyPerms,
+                  onChanged: (v) => setS(() => applyPerms = v ?? false),
+                ),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Vazgeç')),
+            FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Kaydet')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || name.text.trim().isEmpty) return;
+    final label = name.text.trim();
+    if (allRoleLabels().entries.any((e) => e.value.toLowerCase() == label.toLowerCase() && e.key != r?.key)) {
+      toast('Bu isimde bir rol zaten var.');
+      return;
+    }
+    final nr = CustomRole(r?.key ?? 'r${DateTime.now().millisecondsSinceEpoch}', label, perms, approver, alerts);
+    final list = gCustomRoles.values.where((x) => x.key != nr.key).toList()..add(nr);
+    try {
+      await save(list);
+      if (r != null) {
+        final n = await applyToUsers(nr, perms: applyPerms);
+        toast('Kaydedildi${n > 0 ? ' · $n kullanıcı güncellendi' : ''}');
+      } else {
+        toast('Rol eklendi');
+      }
+    } catch (e) {
+      toast('Kaydedilemedi: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Roller')),
+      floatingActionButton: FloatingActionButton.extended(
+        backgroundColor: kOrange,
+        foregroundColor: Colors.white,
+        onPressed: () => _edit(context, null),
+        icon: const Icon(Icons.add),
+        label: const Text('Yeni rol'),
+      ),
+      body: ValueListenableBuilder<int>(
+        valueListenable: roleVersion,
+        builder: (context, _, __) {
+          final list = gCustomRoles.values.toList()..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+          return ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 96), children: [
+            const Text('Kendi tanımladığınız roller. Rolü kullanıcıya verince yetkileri otomatik dolar; kişi bazında yine değiştirebilirsiniz.',
+                style: TextStyle(color: kMuted)),
+            const SizedBox(height: 12),
+            if (list.isEmpty) const Text('Henüz özel rol yok.', style: TextStyle(color: kMuted)),
+            for (final r in list)
+              Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                color: Colors.white,
+                elevation: 0,
+                child: ListTile(
+                  title: Text(r.label, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: Text([
+                    for (final m in kModules.entries) '${m.value}: ${kPermLabels[r.perms[m.key]] ?? 'Yok'}',
+                    if (r.approver) 'Görsel onayı',
+                    if (r.packAlerts) 'Duruş uyarısı',
+                  ].join(' · ')),
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    IconButton(icon: const Icon(Icons.edit), tooltip: 'Düzenle', onPressed: () => _edit(context, r)),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline, color: Color(0xFFC92A2A)),
+                      tooltip: 'Sil',
+                      onPressed: () async {
+                        final used = await db.collection('users').where('role', isEqualTo: r.key).limit(1).get();
+                        if (used.docs.isNotEmpty) {
+                          toast('Bu rolde kullanıcı var. Önce kullanıcılara başka rol verin.');
+                          return;
+                        }
+                        if (!context.mounted) return;
+                        if (!await confirm(context, 'Rol silinsin mi?', r.label, 'Sil')) return;
+                        try {
+                          await save(gCustomRoles.values.where((x) => x.key != r.key).toList());
+                        } catch (e) {
+                          toast('Silinemedi: $e');
+                        }
+                      },
+                    ),
+                  ]),
+                ),
+              ),
+          ]);
+        },
+      ),
+    );
+  }
 }

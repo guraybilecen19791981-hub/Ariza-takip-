@@ -30,6 +30,8 @@ const Map<String, String> kPhotoStages = {
 };
 
 const Map<String, String> kApproverRoles = {'kalite': 'Kalite', 'ihracat': 'İhracat'};
+// Onay verebilen roller: Kalite, İhracat ve "görsel onayı verebilir" işaretli özel roller
+Map<String, String> approverRoles() => {...kApproverRoles, for (final r in gCustomRoles.values) if (r.approver) r.key: r.label};
 
 String dayKey(DateTime d) => '${d.year}-${two(d.month)}-${two(d.day)}';
 
@@ -628,7 +630,7 @@ class PackOps {
         'by': currentUser?.name ?? '',
       });
     }
-    final who = approvers.map((r) => kApproverRoles[r] ?? r).join(', ');
+    final who = approvers.map((r) => approverRoles()[r] ?? r).join(', ');
     await _addEvent(o.id, _event('gorsel', 'Görsel eklendi (${kPhotoStages[stage] ?? stage})${who.isEmpty ? '' : ' · onay isteniyor: $who'}'));
   }
 
@@ -661,7 +663,7 @@ class PackOps {
       await ref(o.id).update({'pendingApprovals': FieldValue.increment(1), 'lastUpdateAt': Timestamp.now()});
     }
     await _addEvent(o.id, _event('onay',
-        'Görsel ${approve ? 'onaylandı' : 'reddedildi'} (${kApproverRoles[role] ?? role} · ${currentUser?.name ?? ''})${note.isEmpty ? '' : ': $note'}'));
+        'Görsel ${approve ? 'onaylandı' : 'reddedildi'} (${approverRoles()[role] ?? role} · ${currentUser?.name ?? ''})${note.isEmpty ? '' : ': $note'}'));
   }
 }
 
@@ -738,7 +740,7 @@ bool canEditPack(PackOrder o) {
   return me.uid == o.ownerUid && me.can('paketleme', 'gir');
 }
 
-bool isApprover(AppUser me) => me.isAdmin || kApproverRoles.containsKey(me.role);
+bool isApprover(AppUser me) => me.isAdmin || approverRoles().containsKey(me.role) || me.approverFlag;
 
 // ---------------------------------------------------------------------------
 // Ana ekran (paketleme)
@@ -1498,7 +1500,7 @@ Future<void> addPhotoDialog(BuildContext context, PackOrder o) async {
               ),
               const SizedBox(height: 12),
               const Text('Onay iste', style: TextStyle(fontWeight: FontWeight.w600)),
-              for (final r in kApproverRoles.entries)
+              for (final r in approverRoles().entries)
                 CheckboxListTile(
                   contentPadding: EdgeInsets.zero,
                   value: approvers.contains(r.key),
@@ -1833,7 +1835,7 @@ class PackPhotos extends StatelessWidget {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text('${kApproverRoles[r] ?? r}: ${p.roleInfo(r)}',
+                                Text('${approverRoles()[r] ?? r}: ${p.roleInfo(r)}',
                                     style: TextStyle(
                                       fontSize: 12,
                                       color: p.roleStatus(r) == 'onay'
