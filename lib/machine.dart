@@ -860,7 +860,16 @@ class MachineOps {
     await batch.commit();
   }
 
-  static Stream<List<MJob>> jobsStream() => jobs.orderBy('startedAt', descending: true).limit(500).snapshots().map((s) => s.docs.map((d) => MJob.fromDoc(d)).toList());
+  // Devam eden işler canlı; bitenler seçili geçmiş aralığından
+  static Stream<List<MJob>> jobsStream() {
+    List<MJob> conv(QuerySnapshot<Map<String, dynamic>> s) => s.docs.map((d) => MJob.fromDoc(d)).toList();
+    final active = jobs.where('status', whereIn: ['acik', 'gun_bitti']).snapshots().map(conv);
+    final done = jobs.where('finishedAt', isGreaterThanOrEqualTo: histFrom()).snapshots().map((s) => conv(s).where((j) => j.finished).toList());
+    return mergeLists<MJob>([active, done], (j) => j.id).map((l) {
+      l.sort((a, b) => (b.startedAt ?? DateTime(2000)).compareTo(a.startedAt ?? DateTime(2000)));
+      return l;
+    });
+  }
 
   static Future<List<MJob>> jobsActiveBetween(DateTime from, DateTime to) async {
     final s = await jobs.where('startedAt', isLessThan: Timestamp.fromDate(to)).orderBy('startedAt', descending: true).limit(500).get();
@@ -2115,6 +2124,34 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
   String _q = '';
   int _filter = 0; // 0 tümü, 1 devam eden, 2 biten
   List<MJob> _last = const [];
+  Stream<List<MJob>>? _s;
+  int _sd = -1;
+  final List<MJob> _extra = [];
+
+  Stream<List<MJob>> get _stream {
+    if (_s == null || _sd != gHistDays.value) {
+      _sd = gHistDays.value;
+      _s = MachineOps.jobsStream();
+    }
+    return _s!;
+  }
+
+  Future<void> _find() async {
+    if (_q.trim().isEmpty) {
+      toast('Önce arama kutusuna sipariş numarasını yazın.');
+      return;
+    }
+    try {
+      final r = await findInHistory('machineJobs', 'orderNo', _q);
+      setState(() {
+        _extra.removeWhere((x) => r.any((d) => d.id == x.id));
+        _extra.addAll(r.map((d) => MJob.fromDoc(d)));
+      });
+      toast(r.isEmpty ? 'Tüm geçmişte bu numarayla sipariş yok.' : '${r.length} kayıt bulundu');
+    } catch (e) {
+      toast('Arama yapılamadı: $e');
+    }
+  }
 
   List<MJob> _apply(List<MJob> all) {
     final q = _q.trim().toLowerCase();
@@ -2130,14 +2167,18 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
       appBar: AppBar(title: const Text('Sipariş arşivi'), actions: [
         IconButton(tooltip: "Excel'e aktar", icon: const Icon(Icons.download), onPressed: () => exportJobsExcel(_last)),
       ]),
-      body: StreamBuilder<List<MJob>>(
-        stream: MachineOps.jobsStream(),
+      body: ValueListenableBuilder<int>(
+        valueListenable: gHistDays,
+        builder: (context, _, __) => StreamBuilder<List<MJob>>(
+        stream: _stream,
         builder: (context, snap) {
           if (snap.hasError) return Center(child: Text('Hata: ${snap.error}'));
           if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-          final list = _apply(snap.data!);
+          final ids = snap.data!.map((j) => j.id).toSet();
+          final list = _apply([...snap.data!, ..._extra.where((x) => !ids.contains(x.id))]);
           _last = list;
           return ListView(padding: const EdgeInsets.all(16), children: [
+            HistBar(onFind: _find),
             TextField(
               decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Sipariş no, ürün kodu, makine ara'),
               onChanged: (v) => setState(() => _q = v),
@@ -2181,6 +2222,7 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
               ),
           ]);
         },
+      ),
       ),
     );
   }

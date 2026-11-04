@@ -85,6 +85,89 @@ class CustomRole {
   Map<String, dynamic> toMap() => {'key': key, 'label': label, 'perms': perms, 'approver': approver, 'packAlerts': packAlerts};
 }
 
+// ---------------------------------------------------------------------------
+// Geçmiş: açık kayıtlar her zaman canlı; bitmiş kayıtlar seçilen aralık kadar geriye yüklenir
+// ---------------------------------------------------------------------------
+const Map<int, String> kHistOpts = {7: 'Son 7 gün', 30: 'Son 30 gün', 90: 'Son 3 ay', 180: 'Son 6 ay', 365: 'Son 1 yıl', 730: 'Son 2 yıl', 3650: 'Tüm geçmiş'};
+final ValueNotifier<int> gHistDays = ValueNotifier<int>(30);
+Timestamp histFrom() => Timestamp.fromDate(DateTime.now().subtract(Duration(days: gHistDays.value)));
+
+// Birden çok canlı listeyi tek listede birleştirir (aynı kayıt bir kez)
+Stream<List<T>> mergeLists<T>(List<Stream<List<T>>> streams, String Function(T) id) {
+  late StreamController<List<T>> c;
+  final latest = List<List<T>?>.filled(streams.length, null);
+  final subs = <StreamSubscription<List<T>>>[];
+  void emit() {
+    if (latest.any((e) => e == null)) return;
+    final m = <String, T>{};
+    for (final l in latest) {
+      for (final x in l!) {
+        m[id(x)] = x;
+      }
+    }
+    c.add(m.values.toList());
+  }
+
+  c = StreamController<List<T>>(onListen: () {
+    for (var i = 0; i < streams.length; i++) {
+      final idx = i;
+      subs.add(streams[idx].listen((v) {
+        latest[idx] = v;
+        emit();
+      }, onError: c.addError));
+    }
+  }, onCancel: () async {
+    for (final s in subs) {
+      await s.cancel();
+    }
+  });
+  return c.stream;
+}
+
+// Seçili aralık dışındaki eski bir kaydı numarasıyla bulur (tam eşleşme)
+Future<List<DocumentSnapshot<Map<String, dynamic>>>> findInHistory(String col, String field, String val) async {
+  final v = val.trim();
+  if (v.isEmpty) return [];
+  final out = <String, DocumentSnapshot<Map<String, dynamic>>>{};
+  for (final x in {v, v.toUpperCase()}) {
+    final s = await db.collection(col).where(field, isEqualTo: x).get();
+    for (final d in s.docs) {
+      out[d.id] = d;
+    }
+  }
+  return out.values.toList();
+}
+
+class HistBar extends StatelessWidget {
+  final VoidCallback? onFind;
+  const HistBar({super.key, this.onFind});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(
+      valueListenable: gHistDays,
+      builder: (context, days, _) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Row(children: [
+          const Text('Geçmiş: ', style: TextStyle(color: kMuted)),
+          DropdownButton<int>(
+            value: kHistOpts.containsKey(days) ? days : 30,
+            underline: const SizedBox.shrink(),
+            items: kHistOpts.entries.map((e) => DropdownMenuItem<int>(value: e.key, child: Text(e.value))).toList(),
+            onChanged: (v) {
+              if (v == null) return;
+              gHistDays.value = v;
+              if (v >= 365) toast('Uzun geçmiş yükleniyor, liste biraz geç açılabilir.');
+            },
+          ),
+          const Spacer(),
+          if (onFind != null) TextButton.icon(onPressed: onFind, icon: const Icon(Icons.manage_search, size: 18), label: const Text('Tüm geçmişte ara')),
+        ]),
+      ),
+    );
+  }
+}
+
 Map<String, CustomRole> gCustomRoles = {};
 final ValueNotifier<int> roleVersion = ValueNotifier<int>(0);
 StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _roleSub;
@@ -1190,21 +1273,21 @@ class _HomePageState extends State<HomePage> {
         tabs = const [Tab(text: 'Açık'), Tab(text: 'Arşiv')];
         views = [
           FaultList(filter: (f) => !f.isClosed, sortOpen: true, empty: 'Açık arıza yok.'),
-          FaultList(filter: (f) => f.isClosed, empty: 'Arşiv boş.'),
+          FaultList(filter: (f) => f.isClosed, empty: 'Arşiv boş.', hist: true),
         ];
         break;
       case 'sef':
         tabs = const [Tab(text: 'Açık'), Tab(text: 'Arşiv')];
         views = [
           FaultList(filter: (f) => !f.isClosed, sortOpen: true, empty: 'Açık arıza yok.'),
-          FaultList(filter: (f) => f.isClosed, empty: 'Arşiv boş.'),
+          FaultList(filter: (f) => f.isClosed, empty: 'Arşiv boş.', hist: true),
         ];
         break;
       case 'admin':
         tabs = const [Tab(text: 'Özet'), Tab(text: 'Arızalar'), Tab(text: 'Kullanıcılar'), Tab(text: 'Makineler')];
         views = [
           const SummaryView(),
-          FaultList(filter: (f) => true, sortOpen: true, empty: 'Henüz arıza yok.'),
+          FaultList(filter: (f) => true, sortOpen: true, empty: 'Henüz arıza yok.', hist: true),
           const UsersView(),
           const MachinesView(),
         ];
@@ -1213,13 +1296,13 @@ class _HomePageState extends State<HomePage> {
         tabs = const [Tab(text: 'İşlerim'), Tab(text: 'Giderdiklerim')];
         views = [
           FaultList(filter: (f) => f.assigneeUid == me.uid && !f.isClosed, sortOpen: true, empty: 'Size atanmış açık arıza yok.'),
-          FaultList(filter: (f) => f.assigneeUid == me.uid && f.isClosed, empty: 'Henüz giderilen arıza yok.'),
+          FaultList(filter: (f) => f.assigneeUid == me.uid && f.isClosed, empty: 'Henüz giderilen arıza yok.', hist: true),
         ];
         break;
       default:
         tabs = const [Tab(text: 'Bildirdiklerim')];
         views = [
-          FaultList(filter: (f) => f.reporterUid == me.uid, empty: 'Henüz arıza bildirmediniz.'),
+          FaultList(filter: (f) => f.reporterUid == me.uid, empty: 'Henüz arıza bildirmediniz.', hist: true),
         ];
     }
 
@@ -1264,28 +1347,88 @@ class _HomePageState extends State<HomePage> {
 }
 
 Stream<List<Fault>> faultsStream() {
-  return db
+  final active = db
       .collection('faults')
-      .orderBy('createdAt', descending: true)
-      .limit(500)
+      .where('status', whereIn: ['acik', 'basladi', 'parca', 'destek'])
       .snapshots()
       .map((s) => s.docs.map((d) => Fault.fromDoc(d)).toList());
+  final closed = db
+      .collection('faults')
+      .where('endedAt', isGreaterThanOrEqualTo: histFrom())
+      .snapshots()
+      .map((s) => s.docs.map((d) => Fault.fromDoc(d)).where((f) => f.isClosed).toList());
+  return mergeLists<Fault>([active, closed], (f) => f.id).map((l) {
+    l.sort((a, b) => (b.createdAt ?? DateTime(2000)).compareTo(a.createdAt ?? DateTime(2000)));
+    return l;
+  });
 }
 
-class FaultList extends StatelessWidget {
+class FaultList extends StatefulWidget {
   final bool Function(Fault) filter;
   final bool sortOpen;
   final String empty;
-  const FaultList({super.key, required this.filter, required this.empty, this.sortOpen = false});
+  final bool hist;
+  const FaultList({super.key, required this.filter, required this.empty, this.sortOpen = false, this.hist = false});
+
+  @override
+  State<FaultList> createState() => _FaultListState();
+}
+
+class _FaultListState extends State<FaultList> {
+  Stream<List<Fault>>? _s;
+  int _sd = -1;
+  final List<Fault> _extra = [];
+
+  Stream<List<Fault>> get _stream {
+    if (_s == null || _sd != gHistDays.value) {
+      _sd = gHistDays.value;
+      _s = faultsStream();
+    }
+    return _s!;
+  }
+
+  Future<void> _find() async {
+    final c = TextEditingController();
+    final v = await showDialog<String>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('Tüm geçmişte ara'),
+        content: TextField(controller: c, autofocus: true, decoration: const InputDecoration(labelText: 'Arıza numarası (ör. A-0012)')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d), child: const Text('Vazgeç')),
+          FilledButton(onPressed: () => Navigator.pop(d, c.text), child: const Text('Ara')),
+        ],
+      ),
+    );
+    if (v == null || v.trim().isEmpty) return;
+    try {
+      final r = await findInHistory('faults', 'code', v);
+      setState(() {
+        _extra.removeWhere((x) => r.any((d) => d.id == x.id));
+        _extra.addAll(r.map((d) => Fault.fromDoc(d)));
+      });
+      toast(r.isEmpty ? 'Bu numarayla arıza bulunamadı.' : '${r.length} kayıt bulundu');
+    } catch (e) {
+      toast('Arama yapılamadı: $e');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(valueListenable: gHistDays, builder: (context, _, __) => _build(context));
+  }
+
+  Widget _build(BuildContext context) {
+    final filter = widget.filter;
+    final sortOpen = widget.sortOpen;
+    final empty = widget.empty;
     return StreamBuilder<List<Fault>>(
-      stream: faultsStream(),
+      stream: _stream,
       builder: (context, snap) {
         if (snap.hasError) return Center(child: Text('Hata: ${snap.error}'));
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-        final list = snap.data!.where(filter).toList();
+        final ids = snap.data!.map((f) => f.id).toSet();
+        final list = [...snap.data!, ..._extra.where((x) => !ids.contains(x.id))].where(filter).toList();
         if (sortOpen) {
           list.sort((a, b) {
             final o = statusOrder(a).compareTo(statusOrder(b));
@@ -1293,14 +1436,17 @@ class FaultList extends StatelessWidget {
             return (b.createdAt ?? DateTime.now()).compareTo(a.createdAt ?? DateTime.now());
           });
         }
-        if (list.isEmpty) {
-          return Center(child: Text(empty, style: const TextStyle(color: kMuted, fontSize: 15)));
-        }
-        return ListView.separated(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
-          itemCount: list.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 10),
-          itemBuilder: (_, i) => FaultCard(f: list[i]),
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
+          children: [
+            if (widget.hist) HistBar(onFind: _find),
+            if (list.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 40),
+                child: Center(child: Text(empty, style: const TextStyle(color: kMuted, fontSize: 15))),
+              ),
+            for (final f in list) Padding(padding: const EdgeInsets.only(bottom: 10), child: FaultCard(f: f)),
+          ],
         );
       },
     );
@@ -2052,7 +2198,7 @@ class SummaryView extends StatelessWidget {
           ['Açık (atandı)', '${count((f) => f.status == 'acik' && f.assigneeUid != null)}'],
           ['Başlandı', '${count((f) => f.status == 'basladi')}'],
           ['Parça / destek bekliyor', '${count((f) => f.isWaiting)}'],
-          ['Giderildi', '${count((f) => f.isClosed)}'],
+          ['Giderildi (${kHistOpts[gHistDays.value] ?? ''})', '${count((f) => f.isClosed)}'],
           ['Toplam', '${all.length}'],
         ];
         return ListView(

@@ -255,8 +255,8 @@ class PalletOps {
     });
   }
 
-  static Future<void> finish(PalletOrder o, String note) =>
-      ref(o.id).update({'status': 'bitti', 'finishedAt': Timestamp.now(), 'finishNote': note, 'updatedAt': FieldValue.serverTimestamp()});
+  static Future<void> finish(PalletOrder o, String note) => ref(o.id)
+      .update({'status': 'bitti', 'finishedAt': Timestamp.now(), 'finishNote': note, 'shippedAt': null, 'updatedAt': FieldValue.serverTimestamp()});
 
   static Future<void> undo(PalletOrder o) =>
       ref(o.id).update({'status': 'acik', 'finishedAt': null, 'shippedAt': null, 'updatedAt': FieldValue.serverTimestamp()});
@@ -297,12 +297,16 @@ class PalletOps {
   }
 }
 
+// Açık ve sevke hazır olanlar her zaman canlı; sevk edilenler seçili geçmiş aralığından
 Stream<List<PalletOrder>> palletStream() {
-  return PalletOps.col
-      .orderBy('createdAt', descending: true)
-      .limit(300)
-      .snapshots()
-      .map((s) => s.docs.map((d) => PalletOrder.fromDoc(d)).toList());
+  List<PalletOrder> conv(QuerySnapshot<Map<String, dynamic>> s) => s.docs.map((d) => PalletOrder.fromDoc(d)).toList();
+  final open = PalletOps.col.where('status', isEqualTo: 'acik').snapshots().map(conv);
+  final ready = PalletOps.col.where('shippedAt', isNull: true).snapshots().map((s) => conv(s).where((o) => o.isFinished).toList());
+  final shipped = PalletOps.col.where('shippedAt', isGreaterThanOrEqualTo: histFrom()).snapshots().map(conv);
+  return mergeLists<PalletOrder>([open, ready, shipped], (o) => o.id).map((l) {
+    l.sort((a, b) => (b.createdAt ?? DateTime(2000)).compareTo(a.createdAt ?? DateTime(2000)));
+    return l;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -368,22 +372,56 @@ class PalletList extends StatefulWidget {
 
 class _PalletListState extends State<PalletList> {
   String _q = '';
+  Stream<List<PalletOrder>>? _s;
+  int _sd = -1;
+  final List<PalletOrder> _extra = [];
+
+  Stream<List<PalletOrder>> get _stream {
+    if (_s == null || _sd != gHistDays.value) {
+      _sd = gHistDays.value;
+      _s = palletStream();
+    }
+    return _s!;
+  }
+
+  Future<void> _find() async {
+    if (_q.trim().isEmpty) {
+      toast('Önce arama kutusuna sipariş numarasını yazın.');
+      return;
+    }
+    try {
+      final r = await findInHistory('palletOrders', 'orderNo', _q);
+      setState(() {
+        _extra.removeWhere((x) => r.any((d) => d.id == x.id));
+        _extra.addAll(r.map((d) => PalletOrder.fromDoc(d)));
+      });
+      toast(r.isEmpty ? 'Tüm geçmişte bu numarayla sipariş yok.' : '${r.length} sipariş bulundu');
+    } catch (e) {
+      toast('Arama yapılamadı: $e');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(valueListenable: gHistDays, builder: (context, _, __) => _build(context));
+  }
+
+  Widget _build(BuildContext context) {
     return StreamBuilder<List<PalletOrder>>(
-      stream: palletStream(),
+      stream: _stream,
       builder: (context, snap) {
         if (snap.hasError) return Center(child: Text('Hata: ${snap.error}'));
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
         final q = _q.trim().toLowerCase();
-        final list = snap.data!.where((o) => widget.mode == 0 ? !o.isFinished : (widget.mode == 1 ? o.isReady : o.isShipped)).where((o) {
+        final ids = snap.data!.map((o) => o.id).toSet();
+        final list = [...snap.data!, ..._extra.where((x) => !ids.contains(x.id))].where((o) => widget.mode == 0 ? !o.isFinished : (widget.mode == 1 ? o.isReady : o.isShipped)).where((o) {
           if (q.isEmpty) return true;
           return '${o.orderNo} ${o.customer} ${o.lines.map((l) => l.productCode).join(' ')}'.toLowerCase().contains(q);
         }).toList();
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
           children: [
+            if (widget.mode == 2) HistBar(onFind: _find),
             TextField(
               decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Sipariş no, müşteri, ürün kodu ara'),
               onChanged: (v) => setState(() => _q = v),

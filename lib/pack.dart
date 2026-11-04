@@ -725,12 +725,16 @@ class PackPhoto {
   }
 }
 
+// Açık siparişler + onay bekleyen görseli olanlar canlı; bitenler seçili geçmiş aralığından
 Stream<List<PackOrder>> packStream() {
-  return PackOps.col
-      .orderBy('createdAt', descending: true)
-      .limit(400)
-      .snapshots()
-      .map((s) => s.docs.map((d) => PackOrder.fromDoc(d)).toList());
+  List<PackOrder> conv(QuerySnapshot<Map<String, dynamic>> s) => s.docs.map((d) => PackOrder.fromDoc(d)).toList();
+  final active = PackOps.col.where('status', whereIn: ['calisiyor', 'durdu', 'beklemede']).snapshots().map(conv);
+  final pending = PackOps.col.where('pendingApprovals', isGreaterThan: 0).snapshots().map(conv);
+  final done = PackOps.col.where('finishedAt', isGreaterThanOrEqualTo: histFrom()).snapshots().map((s) => conv(s).where((o) => o.isFinished).toList());
+  return mergeLists<PackOrder>([active, pending, done], (o) => o.id).map((l) {
+    l.sort((a, b) => (b.createdAt ?? DateTime(2000)).compareTo(a.createdAt ?? DateTime(2000)));
+    return l;
+  });
 }
 
 bool canEditPack(PackOrder o) {
@@ -819,22 +823,56 @@ class PackList extends StatefulWidget {
 
 class _PackListState extends State<PackList> {
   String _q = '';
+  Stream<List<PackOrder>>? _s;
+  int _sd = -1;
+  final List<PackOrder> _extra = [];
+
+  Stream<List<PackOrder>> get _stream {
+    if (_s == null || _sd != gHistDays.value) {
+      _sd = gHistDays.value;
+      _s = packStream();
+    }
+    return _s!;
+  }
+
+  Future<void> _find() async {
+    if (_q.trim().isEmpty) {
+      toast('Önce arama kutusuna sipariş numarasını yazın.');
+      return;
+    }
+    try {
+      final r = await findInHistory('packOrders', 'orderNo', _q);
+      setState(() {
+        _extra.removeWhere((x) => r.any((d) => d.id == x.id));
+        _extra.addAll(r.map((d) => PackOrder.fromDoc(d)));
+      });
+      toast(r.isEmpty ? 'Tüm geçmişte bu numarayla sipariş yok. Numarayı tam yazın.' : '${r.length} sipariş bulundu');
+    } catch (e) {
+      toast('Arama yapılamadı: $e');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<int>(valueListenable: gHistDays, builder: (context, _, __) => _build(context));
+  }
+
+  Widget _build(BuildContext context) {
     return StreamBuilder<List<PackOrder>>(
-      stream: packStream(),
+      stream: _stream,
       builder: (context, snap) {
         if (snap.hasError) return Center(child: Text('Hata: ${snap.error}'));
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
         final q = _q.trim().toLowerCase();
-        final list = snap.data!.where(widget.filter).where((o) {
+        final ids = snap.data!.map((o) => o.id).toSet();
+        final list = [...snap.data!, ..._extra.where((x) => !ids.contains(x.id))].where(widget.filter).where((o) {
           if (q.isEmpty) return true;
           return '${o.orderNo} ${o.productCode} ${o.ownerName} ${o.finishNote}'.toLowerCase().contains(q);
         }).toList();
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
           children: [
+            if (widget.searchable) HistBar(onFind: _find),
             if (widget.searchable)
               Padding(
                 padding: const EdgeInsets.only(bottom: 12),
