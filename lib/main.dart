@@ -9,6 +9,7 @@ import 'package:excel/excel.dart' as xl;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -27,7 +28,19 @@ part 'machine.dart';
 const String kAdminEmail = 'guraybilecen19791981@gmail.com';
 const int kMaxPhotos = 30; // kayıt başına en fazla görsel
 
-const FirebaseOptions kFirebaseOptions = FirebaseOptions(
+// Web sürümü (iPhone / tarayıcı) panelle aynı web uygulama kimliğini kullanır.
+const FirebaseOptions kWebFirebaseOptions = FirebaseOptions(
+  apiKey: 'AIzaSyDBP2FfIl7lVdktLFpEhZkr9hHGkvq3Qzo',
+  appId: '1:360683668152:web:40dc7c04eec57a42edaa4d',
+  messagingSenderId: '360683668152',
+  projectId: 'ariza-takip-3bce3',
+  authDomain: 'ariza-takip-3bce3.firebaseapp.com',
+  storageBucket: 'ariza-takip-3bce3.firebasestorage.app',
+);
+
+FirebaseOptions get kFirebaseOptions => kIsWeb ? kWebFirebaseOptions : kAndroidFirebaseOptions;
+
+const FirebaseOptions kAndroidFirebaseOptions = FirebaseOptions(
   apiKey: 'AIzaSyD1W2Y4eH-OfoZH5GK7L1CpzP1SxiAhGEM',
   appId: '1:360683668152:android:80ef3e57f06392c4edaa4d',
   messagingSenderId: '360683668152',
@@ -61,7 +74,16 @@ const Map<String, String> kRoleLabels = {
 // Panel yetkileri: yok < gor < gir < yonet
 const List<String> kPermLevels = ['yok', 'gor', 'gir', 'yonet'];
 const Map<String, String> kPermLabels = {'yok': 'Yok', 'gor': 'Görür', 'gir': 'Girer / düzenler', 'yonet': 'Yönetir / onaylar'};
-const Map<String, String> kModules = {'ariza': 'Arıza', 'paketleme': 'Paketleme', 'paletleme': 'Paletleme', 'hat': 'Makine takip', 'rapor': 'Raporlar / Excel'};
+// Arıza paneli kaldırıldı (kayıtlar veritabanında duruyor; ileride diğer panellerle birleştirilecek).
+const bool kArizaPanel = false;
+const Map<String, String> kModules = {
+  if (kArizaPanel) 'ariza': 'Arıza',
+  'paketleme': 'Paketleme',
+  'paletleme': 'Paletleme',
+  'hat': 'Sargı makineleri',
+  'uretim': 'Üretim makineleri',
+  'rapor': 'Raporlar / Excel',
+};
 
 // ---------------------------------------------------------------------------
 // Özel roller (web panelinden ya da uygulamadan admin tanımlar; config/roles belgesinde)
@@ -197,7 +219,7 @@ Map<String, dynamic> roleFlags(String role) {
 Map<String, String> defaultPerms(String role) {
   final custom = gCustomRoles[role];
   if (custom != null) return Map<String, String>.from(custom.perms);
-  Map<String, String> p(String a, String pk, String pl, String h, String r) => {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'rapor': r};
+  Map<String, String> p(String a, String pk, String pl, String h, String r) => {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'uretim': h, 'rapor': r};
   switch (role) {
     case 'admin':
       return p('yonet', 'yonet', 'yonet', 'yonet', 'yonet');
@@ -573,7 +595,7 @@ class Notifier {
         const NotificationDetails(android: details), payload: 'pack:$orderId');
   }
 
-  static Future<void> machineAlert(String id, String title, String body) async {
+  static Future<void> machineAlert(String id, String title, String body, [String group = 'sargi']) async {
     final details = AndroidNotificationDetails(
       'makine_alarm_v1',
       'Makine duruş alarmı',
@@ -589,7 +611,7 @@ class Notifier {
       autoCancel: true,
       visibility: NotificationVisibility.public,
     );
-    await notif.show(id.hashCode & 0x3fffffff, title, body, NotificationDetails(android: details), payload: 'mach:$id');
+    await notif.show(id.hashCode & 0x3fffffff, title, body, NotificationDetails(android: details), payload: 'mach:$group|$id');
   }
 
   static Future<void> cancel(String faultId) async {
@@ -607,8 +629,11 @@ void openPayload(String payload) {
     return;
   }
   if (payload.startsWith('mach:')) {
+    // mach:<grup>|<alarm id>  (eski bildirimlerde grup yok)
+    final rest = payload.substring(5);
+    final g = mGroupOf(rest.contains('|') ? rest.split('|').first : 'sargi');
     navKey.currentState?.push(MaterialPageRoute(
-        builder: (_) => Scaffold(appBar: AppBar(title: const Text('Makine takip')), body: const MachineLive())));
+        builder: (_) => Scaffold(appBar: AppBar(title: Text(g.title)), body: MachineLive(group: g))));
     return;
   }
   if (payload.startsWith('pack:')) {
@@ -621,7 +646,7 @@ void openPayload(String payload) {
 
 List<Widget> commonActions(AppUser me) {
   return [
-    if (me.getsAlarm || me.getsPackAlerts || me.machineAlarm)
+    if (!kIsWeb && ((kArizaPanel && me.getsAlarm) || me.getsPackAlerts || me.machineAlarm))
       IconButton(
         tooltip: 'Bildirimler için pil ayarı',
         icon: const Icon(Icons.battery_alert),
@@ -653,7 +678,7 @@ class Watchers {
     await stop();
     _key = key;
 
-    if (u.getsAlarm) {
+    if (kArizaPanel && u.getsAlarm) {
       final since = Timestamp.fromDate(DateTime.now().subtract(const Duration(seconds: 10)));
       _alarmSub = db.collection('faults').where('createdAt', isGreaterThan: since).snapshots().listen((s) {
         for (final c in s.docChanges) {
@@ -667,7 +692,7 @@ class Watchers {
       }, onError: (_) {});
     }
 
-    if (u.role == 'teknisyen' || u.role == 'sef' || u.role == 'admin') {
+    if (kArizaPanel && (u.role == 'teknisyen' || u.role == 'sef' || u.role == 'admin')) {
       bool first = true;
       final known = <String>{};
       _assignSub = db.collection('faults').where('assigneeUid', isEqualTo: u.uid).snapshots().listen((s) {
@@ -723,13 +748,15 @@ class Watchers {
             c.doc.id,
             'MAKİNE DURDU: ${m['machineName'] ?? ''}',
             '${m['label'] ?? ''}${(m['note'] ?? '').toString().isEmpty ? '' : ' · ${m['note']}'}${(m['line'] ?? '').toString().isEmpty ? '' : ' · ${m['line']}'} · ${m['by'] ?? ''}',
+            mGroupOf((m['group'] ?? '').toString()).key,
           );
         }
       }, onError: (_) {});
     }
 
+    if (kIsWeb) return; // web sürümünde arka plan servisi yok
     try {
-      if ((u.role == 'bildiren' || u.role == 'paketci') && !u.alarm && !u.machineAlarm) {
+      if (!u.machineAlarm && !u.getsPackAlerts && !(kArizaPanel && u.getsAlarm)) {
         await keepAlive.invokeMethod('stop');
       } else {
         await keepAlive.invokeMethod('start');
@@ -1037,7 +1064,7 @@ class Presence with WidgetsBindingObserver {
     final uid = _uid;
     if (uid == null) return;
     try {
-      await db.collection('users').doc(uid).update({'lastSeen': FieldValue.serverTimestamp(), 'active': active, 'lastSeenVia': 'Telefon'});
+      await db.collection('users').doc(uid).update({'lastSeen': FieldValue.serverTimestamp(), 'active': active, 'lastSeenVia': kIsWeb ? 'Web uygulama' : 'Telefon'});
     } catch (_) {}
   }
 
@@ -1114,6 +1141,24 @@ Widget storedImage(String url, String data, {double? width, double? height, BoxF
   }
 }
 
+/// Excel vb. dosyayı paylaşır. Telefonda paylaş menüsü açılır; web sürümünde
+/// (iPhone Safari) paylaş menüsü açılabiliyorsa açılır, açılamazsa dosya indirilir.
+Future<void> shareBytes(List<int> bytes, String name, String text) async {
+  if (kIsWeb) {
+    final data = Uint8List.fromList(bytes);
+    await Share.shareXFiles(
+      [XFile.fromData(data, name: name, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')],
+      text: text,
+      fileNameOverrides: [name],
+    );
+    return;
+  }
+  final dir = await getTemporaryDirectory();
+  final file = File('${dir.path}/$name');
+  await file.writeAsBytes(bytes, flush: true);
+  await Share.shareXFiles([XFile(file.path)], text: text);
+}
+
 void openStoredImage(BuildContext context, String url, String data) {
   Navigator.of(context).push(MaterialPageRoute(
     builder: (_) => Scaffold(
@@ -1127,9 +1172,11 @@ void openStoredImage(BuildContext context, String url, String data) {
 Future<void> signOut() async {
   await Presence.I.stop();
   await Watchers.stop();
-  try {
-    await keepAlive.invokeMethod('stop');
-  } catch (_) {}
+  if (!kIsWeb) {
+    try {
+      await keepAlive.invokeMethod('stop');
+    } catch (_) {}
+  }
   currentUser = null;
   await FirebaseAuth.instance.signOut();
 }
@@ -1216,7 +1263,7 @@ class _HomePageState extends State<HomePage> {
     final modules = <String>[];
     final packFirst = me.role == 'paketci' || me.role == 'kalite' || me.role == 'ihracat' || me.role == 'vardiya' || me.role == 'planlama';
     if (packFirst && me.can('paketleme', 'gor')) modules.add('paketleme');
-    if (me.can('ariza', 'gor')) modules.add('ariza');
+    if (kArizaPanel && me.can('ariza', 'gor')) modules.add('ariza');
     if (!packFirst && me.can('paketleme', 'gor')) modules.add('paketleme');
     if (me.can('hat', 'gor')) {
       if (me.role == 'paketci') {
@@ -1225,11 +1272,20 @@ class _HomePageState extends State<HomePage> {
         modules.add('hat');
       }
     }
+    if (me.can('uretim', 'gor')) {
+      final i = modules.indexOf('hat');
+      if (i >= 0) {
+        modules.insert(i + 1, 'uretim');
+      } else {
+        modules.add('uretim');
+      }
+    }
     if (me.role == 'depo' && me.can('paletleme', 'gor')) {
       modules.insert(0, 'paletleme');
     } else if (me.can('paletleme', 'gor')) {
       modules.add('paletleme');
     }
+    if (me.isAdmin && !kArizaPanel) modules.add('yonetim');
     if (modules.isEmpty) {
       return const SimpleMessagePage(
         title: 'Panel yetkiniz yok',
@@ -1245,10 +1301,24 @@ class _HomePageState extends State<HomePage> {
         destinations: [
           for (final m in modules)
             NavigationDestination(
-              icon: Icon(m == 'ariza'
-                  ? Icons.build_circle_outlined
-                  : (m == 'paketleme' ? Icons.inventory_2_outlined : (m == 'hat' ? Icons.precision_manufacturing_outlined : Icons.layers_outlined))),
-              label: m == 'ariza' ? 'Arıza' : (m == 'paketleme' ? 'Paketleme' : (m == 'hat' ? 'Makineler' : 'Paletleme')),
+              icon: Icon(const {
+                    'ariza': Icons.build_circle_outlined,
+                    'paketleme': Icons.inventory_2_outlined,
+                    'hat': Icons.precision_manufacturing_outlined,
+                    'uretim': Icons.factory_outlined,
+                    'paletleme': Icons.layers_outlined,
+                    'yonetim': Icons.manage_accounts_outlined,
+                  }[m] ??
+                  Icons.apps),
+              label: const {
+                    'ariza': 'Arıza',
+                    'paketleme': 'Paketleme',
+                    'hat': 'Sargı',
+                    'uretim': 'Üretim',
+                    'paletleme': 'Paletleme',
+                    'yonetim': 'Yönetim',
+                  }[m] ??
+                  m,
             ),
         ],
       );
@@ -1256,8 +1326,28 @@ class _HomePageState extends State<HomePage> {
     final current = modules[_module];
     if (current == 'paketleme') return PackHome(me: me, nav: nav);
     if (current == 'paletleme') return PalletHome(me: me, nav: nav);
-    if (current == 'hat') return MachineHome(me: me, nav: nav);
+    if (current == 'hat') return MachineHome(key: const ValueKey('mh-sargi'), me: me, nav: nav, group: kSargi);
+    if (current == 'uretim') return MachineHome(key: const ValueKey('mh-uretim'), me: me, nav: nav, group: kUretim);
+    if (current == 'yonetim') return _adminScaffold(context, me, nav);
     return _arizaScaffold(context, me, nav);
+  }
+
+  // Admin: kullanıcılar ve roller (arıza paneli kaldırıldığı için ayrı sekme)
+  Widget _adminScaffold(BuildContext context, AppUser me, Widget? nav) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Bind · Yönetim', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            Text('${me.name} · ${me.roleLabel}', style: const TextStyle(fontSize: 12, color: Color(0xFFADB5BD))),
+          ],
+        ),
+        actions: [...commonActions(me)],
+      ),
+      bottomNavigationBar: nav,
+      body: const UsersView(),
+    );
   }
 
   Widget _arizaScaffold(BuildContext context, AppUser me, Widget? nav) {
@@ -2275,11 +2365,8 @@ Future<void> exportExcel() async {
       toast('Excel oluşturulamadı.');
       return;
     }
-    final dir = await getTemporaryDirectory();
     final now = DateTime.now();
-    final file = File('${dir.path}/ariza_takip_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}.xlsx');
-    await file.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(file.path)], text: 'Bind Takip arıza kayıtları');
+    await shareBytes(bytes, 'ariza_takip_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}.xlsx', 'Bind Takip arıza kayıtları');
   } catch (e) {
     toast('Excel hatası: $e');
   }
@@ -2344,7 +2431,7 @@ class UsersView extends StatelessWidget {
             const Text(
               'Kullanıcıyı buradan ekleyebilir ya da kişi telefondan "Yeni hesap oluştur" ile kayıt olabilir. '
               'Rol seçince panel yetkileri otomatik dolar; isterseniz her paneli ayrıca değiştirin. '
-              'Alarm açık olanların telefonunda yeni arızada alarm çalar. Makine anahtarı açık olanlara makine duruş alarmı gider.',
+              'Makine anahtarı açık olanlara makine duruş alarmı gider (Sargı ve Üretim makineleri).',
               style: TextStyle(color: kMuted),
             ),
             const SizedBox(height: 12),
@@ -2418,23 +2505,24 @@ class UsersView extends StatelessWidget {
                             ),
                           ],
                         ),
-                        Column(
-                          children: [
-                            const Text('Alarm', style: TextStyle(fontSize: 12, color: kMuted)),
-                            Switch(
-                              value: u.role == 'sef' ? true : u.alarm,
-                              onChanged: u.role == 'sef' ? null : (v) => db.collection('users').doc(u.uid).update({'alarm': v}),
-                            ),
-                          ],
-                        ),
+                        if (kArizaPanel)
+                          Column(
+                            children: [
+                              const Text('Alarm', style: TextStyle(fontSize: 12, color: kMuted)),
+                              Switch(
+                                value: u.role == 'sef' ? true : u.alarm,
+                                onChanged: u.role == 'sef' ? null : (v) => db.collection('users').doc(u.uid).update({'alarm': v}),
+                              ),
+                            ],
+                          ),
                       ],
                     ),
-                    if (u.role != 'admin' && u.role != 'bekliyor' && u.can('hat', 'gor')) ...[
+                    if (u.role != 'admin' && u.role != 'bekliyor' && (u.can('hat', 'gor') || u.can('uretim', 'gor'))) ...[
                       const SizedBox(height: 8),
                       OutlinedButton.icon(
                         onPressed: () => pickUserLines(context, u),
                         icon: const Icon(Icons.precision_manufacturing_outlined, size: 18),
-                        label: Text('Makine hatları: ${u.can('hat', 'yonet') ? 'Tümü (yönetici)' : (u.lines.isEmpty ? 'Tümü' : u.lines.join(', '))}'),
+                        label: Text('Makine hat / bölgeleri: ${u.lines.isEmpty ? 'Tümü' : u.lines.join(', ')}'),
                       ),
                     ],
                     if (u.role != 'admin' && u.role != 'bekliyor') ...[

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Bind Takip - şirket içi takip uygulaması">
+  <meta name="theme-color" content="#C2410C">
+
+  <!-- iPhone: Ana ekrana ekle -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Bind Takip">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="manifest" href="manifest.json">
+  <title>Bind Takip</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #F2F3F5; }
+    #yukleniyor {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px;
+      font: 600 16px -apple-system, system-ui, sans-serif; color: #5B636E;
+    }
+    #yukleniyor .logo {
+      width: 72px; height: 72px; border-radius: 18px; background: #C2410C; color: #fff;
+      display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 800;
+    }
+  </style>
+</head>
+<body>
+  <div id="yukleniyor"><div class="logo">BT</div>Bind Takip yükleniyor…</div>
+  <script>
+    window.addEventListener('flutter-first-frame', function () {
+      var e = document.getElementById('yukleniyor');
+      if (e) e.remove();
+    });
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

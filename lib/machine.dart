@@ -1,8 +1,39 @@
 part of 'main.dart';
 
 // ---------------------------------------------------------------------------
-// Makine takip (hat makineleri: durum, ürün, personel, üretim, vardiya raporu)
+// Makine takip: Sargı makineleri ve Üretim makineleri
+// (durum, ürün, personel, üretim, fire, vardiya raporu, sipariş arşivi)
 // ---------------------------------------------------------------------------
+
+// Makine grubu: aynı ekranlar iki ayrı panel olarak kullanılır.
+// Eski kayıtlarda "group" alanı yoktur; bunlar Sargı makineleri sayılır.
+class MGroup {
+  final String key;
+  final String title;
+  final String lineLabel; // Hat / Bölge
+  final String perm; // yetki modülü
+  final String reasonsDoc; // config belgesi
+  final List<String> defaultLines;
+  const MGroup(this.key, this.title, this.lineLabel, this.perm, this.reasonsDoc, this.defaultLines);
+
+  bool owns(String g) => (g.isEmpty ? 'sargi' : g) == key;
+  String get lineLower => lineLabel.toLowerCase();
+  String get noLine => '$lineLabel belirtilmemiş';
+}
+
+const MGroup kSargi = MGroup('sargi', 'Sargı makineleri', 'Hat', 'hat', 'machineReasons', []);
+const MGroup kUretim = MGroup('uretim', 'Üretim makineleri', 'Bölge', 'uretim', 'machineReasonsUretim', ['Zemin kat', '1. kat']);
+const List<MGroup> kMGroups = [kSargi, kUretim];
+MGroup mGroupOf(String key) => key == 'uretim' ? kUretim : kSargi;
+
+// Fire metni: paket fire ve ürün fire (adet / kg)
+String fireText(double pA, double pK, double uA, double uK) {
+  String q(double a, double k) => [if (a > 0) '${fmtQty(a)} adet', if (k > 0) '${fmtQty(k)} kg'].join(' + ');
+  final p = <String>[];
+  if (pA > 0 || pK > 0) p.add('paket fire ${q(pA, pK)}');
+  if (uA > 0 || uK > 0) p.add('ürün fire ${q(uA, uK)}');
+  return p.join(' · ');
+}
 
 const String kRunKey = 'calisiyor';
 const String kOffKey = 'kapali';
@@ -145,6 +176,11 @@ class LineMachine {
   final DateTime? jobStartedAt;
   final double jobAdet;
   final double jobKg;
+  final String group;
+  final double jobFpAdet;
+  final double jobFpKg;
+  final double jobFuAdet;
+  final double jobFuKg;
 
   LineMachine({
     required this.id,
@@ -167,6 +203,11 @@ class LineMachine {
     this.jobStartedAt,
     this.jobAdet = 0,
     this.jobKg = 0,
+    this.group = 'sargi',
+    this.jobFpAdet = 0,
+    this.jobFpKg = 0,
+    this.jobFuAdet = 0,
+    this.jobFuKg = 0,
   });
 
   factory LineMachine.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -192,9 +233,16 @@ class LineMachine {
       jobStartedAt: tsToDate(m['jobStartedAt']),
       jobAdet: _dbl(m['jobAdet']),
       jobKg: _dbl(m['jobKg']),
+      group: (m['group'] ?? '').toString().isEmpty ? 'sargi' : m['group'].toString(),
+      jobFpAdet: _dbl(m['jobFpAdet']),
+      jobFpKg: _dbl(m['jobFpKg']),
+      jobFuAdet: _dbl(m['jobFuAdet']),
+      jobFuKg: _dbl(m['jobFuKg']),
     );
   }
 
+  MGroup get grp => mGroupOf(group);
+  String get jobFireText => fireText(jobFpAdet, jobFpKg, jobFuAdet, jobFuKg);
   bool get hasJob => jobId.isNotEmpty;
   String get jobQtyText {
     final p = <String>[];
@@ -224,6 +272,7 @@ class MLog {
   final int daily;
   final String jobId;
   final String orderNo;
+  final String group;
 
   MLog({
     required this.id,
@@ -241,6 +290,7 @@ class MLog {
     this.daily = 0,
     this.jobId = '',
     this.orderNo = '',
+    this.group = '',
   });
 
   factory MLog.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -261,6 +311,7 @@ class MLog {
       daily: _int(m['daily']),
       jobId: (m['jobId'] ?? '').toString(),
       orderNo: (m['orderNo'] ?? '').toString(),
+      group: (m['group'] ?? '').toString(),
     );
   }
 
@@ -292,6 +343,11 @@ class MEntry {
   final String text;
   final String jobId;
   final String orderNo;
+  final String group;
+  final double fp; // paket fire
+  final String fpUnit;
+  final double fu; // ürün fire
+  final String fuUnit;
 
   MEntry({
     required this.id,
@@ -309,6 +365,11 @@ class MEntry {
     required this.text,
     this.jobId = '',
     this.orderNo = '',
+    this.group = '',
+    this.fp = 0,
+    this.fpUnit = 'adet',
+    this.fu = 0,
+    this.fuUnit = 'adet',
   });
 
   factory MEntry.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -329,10 +390,16 @@ class MEntry {
       text: (m['text'] ?? '').toString(),
       jobId: (m['jobId'] ?? '').toString(),
       orderNo: (m['orderNo'] ?? '').toString(),
+      group: (m['group'] ?? '').toString(),
+      fp: _dbl(m['fp']),
+      fpUnit: (m['fpUnit'] ?? 'adet').toString(),
+      fu: _dbl(m['fu']),
+      fuUnit: (m['fuUnit'] ?? 'adet').toString(),
     );
   }
 
   bool get isProd => kind == 'uretim';
+  String get fireTxt => fireText(fpUnit == 'kg' ? 0 : fp, fpUnit == 'kg' ? fp : 0, fuUnit == 'kg' ? 0 : fu, fuUnit == 'kg' ? fu : 0);
   String get kindLabel => const {
         'uretim': 'Üretim girişi',
         'bilgi': 'Kişi / bilgi güncelleme',
@@ -365,6 +432,11 @@ class MJob {
   final int runSec;
   final Map<String, int> stops;
   final int dayCount;
+  final String group;
+  final double fpAdet;
+  final double fpKg;
+  final double fuAdet;
+  final double fuKg;
 
   MJob({
     required this.id,
@@ -386,6 +458,11 @@ class MJob {
     required this.runSec,
     required this.stops,
     required this.dayCount,
+    this.group = '',
+    this.fpAdet = 0,
+    this.fpKg = 0,
+    this.fuAdet = 0,
+    this.fuKg = 0,
   });
 
   factory MJob.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -413,9 +490,15 @@ class MJob {
       runSec: _int(m['runSec']),
       stops: st,
       dayCount: _int(m['dayCount']),
+      group: (m['group'] ?? '').toString(),
+      fpAdet: _dbl(m['fpAdet']),
+      fpKg: _dbl(m['fpKg']),
+      fuAdet: _dbl(m['fuAdet']),
+      fuKg: _dbl(m['fuKg']),
     );
   }
 
+  String get fireTxt => fireText(fpAdet, fpKg, fuAdet, fuKg);
   bool get finished => status == 'bitti';
   int get stopSec => stops.values.fold(0, (a, b) => a + b);
   double get efficiency => runSec + stopSec == 0 ? 0 : runSec * 100 / (runSec + stopSec);
@@ -455,8 +538,28 @@ class MStat {
   final Map<String, int> stops = {};
   double qtyAdet = 0;
   double qtyKg = 0;
+  double fpAdet = 0;
+  double fpKg = 0;
+  double fuAdet = 0;
+  double fuKg = 0;
   final Set<String> products = {};
   MStat(this.id, this.name, this.line);
+
+  String get fireTxt => fireText(fpAdet, fpKg, fuAdet, fuKg);
+  bool get hasFire => fpAdet > 0 || fpKg > 0 || fuAdet > 0 || fuKg > 0;
+  bool get hasData => tracked > 0 || qtyAdet > 0 || qtyKg > 0 || hasFire;
+  void addFire(MEntry e) {
+    if (e.fpUnit == 'kg') {
+      fpKg += e.fp;
+    } else {
+      fpAdet += e.fp;
+    }
+    if (e.fuUnit == 'kg') {
+      fuKg += e.fu;
+    } else {
+      fuAdet += e.fu;
+    }
+  }
 
   int get stopTotal => stops.values.fold(0, (a, b) => a + b);
   int get tracked => run + stopTotal;
@@ -489,7 +592,8 @@ List<MLog> _withOpenLogs(List<LineMachine> machines, List<MLog> logs) {
           workers: m.workers,
           daily: m.daily,
           jobId: m.jobId,
-          orderNo: m.orderNo));
+          orderNo: m.orderNo,
+          group: m.group));
     }
   }
   return all;
@@ -526,6 +630,7 @@ Map<String, MStat> computeMStats(List<LineMachine> machines, List<MLog> logs, Li
     } else {
       st.qtyAdet += e.qty;
     }
+    st.addFire(e);
     if (e.productCode.isNotEmpty) st.products.add(e.productCode);
   }
   return out;
@@ -535,35 +640,39 @@ String fmtSec(int s) => fmtMin((s / 60).round());
 
 DateTime dayStart(DateTime d) => DateTime(d.year, d.month, d.day);
 
-bool canMachineEnter(AppUser? me) => me != null && me.can('hat', 'gir');
-bool canMachineManage(AppUser? me) => me != null && (me.isAdmin || me.can('hat', 'yonet'));
+bool canMachineEnter(AppUser? me, MGroup g) => me != null && me.can(g.perm, 'gir');
+bool canMachineManage(AppUser? me, MGroup g) => me != null && (me.isAdmin || me.can(g.perm, 'yonet'));
 
-// Kullanıcının görebileceği hatlar: null = tüm hatlar
-Set<String>? visibleLines(AppUser? me) {
+// Kullanıcının görebileceği hatlar / bölgeler: null = tümü.
+// Kullanıcıya bu paneldeki hat / bölgelerden hiçbiri atanmamışsa paneldeki tüm makineleri görür.
+Set<String>? visibleLines(AppUser? me, MGroup g, Iterable<String> groupLines) {
   if (me == null) return <String>{};
-  if (me.isAdmin || me.can('hat', 'yonet') || me.lines.isEmpty) return null;
-  return me.lines.toSet();
+  if (me.isAdmin || me.can(g.perm, 'yonet') || me.lines.isEmpty) return null;
+  final gl = groupLines.toSet();
+  final mine = me.lines.where(gl.contains).toSet();
+  return mine.isEmpty ? null : mine;
 }
 
-bool lineVisible(AppUser? me, String line) {
-  final v = visibleLines(me);
-  return v == null || v.contains(line);
+List<T> filterVisible<T>(AppUser? me, MGroup g, Iterable<T> items, String Function(T) line) {
+  final l = items.toList();
+  final v = visibleLines(me, g, l.map(line));
+  return v == null ? l : l.where((x) => v.contains(line(x))).toList();
 }
 
 class MachineOps {
   static CollectionReference<Map<String, dynamic>> get col => db.collection('lineMachines');
   static CollectionReference<Map<String, dynamic>> get logs => db.collection('machineLogs');
   static CollectionReference<Map<String, dynamic>> get entries => db.collection('machineEntries');
-  static DocumentReference<Map<String, dynamic>> get cfg => db.collection('config').doc('machineReasons');
+  static DocumentReference<Map<String, dynamic>> cfg(MGroup g) => db.collection('config').doc(g.reasonsDoc);
   static DocumentReference<Map<String, dynamic>> get shiftCfg => db.collection('config').doc('machineShifts');
 
-  static Stream<List<MReason>> reasonsStream() => cfg.snapshots().map((s) {
+  static Stream<List<MReason>> reasonsStream(MGroup g) => cfg(g).snapshots().map((s) {
         final raw = s.data()?['items'];
         if (raw is List && raw.isNotEmpty) return raw.map((e) => MReason.fromMap(e)).where((r) => r.key.isNotEmpty).toList();
         return List<MReason>.from(kDefaultMReasons);
       });
 
-  static Future<void> saveReasons(List<MReason> list) => cfg.set({'items': list.map((r) => r.toMap()).toList()});
+  static Future<void> saveReasons(MGroup g, List<MReason> list) => cfg(g).set({'items': list.map((r) => r.toMap()).toList()});
 
   static Stream<List<MShift>> shiftsStream() => shiftCfg.snapshots().map((s) {
         final raw = s.data()?['items'];
@@ -584,35 +693,36 @@ class MachineOps {
     return x;
   }
 
-  static Stream<List<LineMachine>> machinesStream({bool all = false}) => col.snapshots().map((s) {
-        final l = s.docs.map((d) => LineMachine.fromDoc(d));
-        return _sorted(all ? l : l.where((m) => lineVisible(currentUser, m.line)));
+  static Stream<List<LineMachine>> machinesStream(MGroup g, {bool all = false}) => col.snapshots().map((s) {
+        final l = s.docs.map((d) => LineMachine.fromDoc(d)).where((m) => g.owns(m.group));
+        return _sorted(all ? l : filterVisible<LineMachine>(currentUser, g, l, (m) => m.line));
       });
 
-  static Stream<List<MLog>> logsSince(DateTime from) => logs
+  static Stream<List<MLog>> logsSince(MGroup g, DateTime from) => logs
       .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(from))
       .snapshots()
-      .map((s) => s.docs.map((d) => MLog.fromDoc(d)).toList());
+      .map((s) => s.docs.map((d) => MLog.fromDoc(d)).where((l) => g.owns(l.group)).toList());
 
-  static Stream<List<MEntry>> entriesSince(DateTime from) => entries
+  static Stream<List<MEntry>> entriesSince(MGroup g, DateTime from) => entries
       .where('t', isGreaterThanOrEqualTo: Timestamp.fromDate(from))
       .snapshots()
-      .map((s) => s.docs.map((d) => MEntry.fromDoc(d)).toList());
+      .map((s) => s.docs.map((d) => MEntry.fromDoc(d)).where((e) => g.owns(e.group)).toList());
 
-  static Future<List<MLog>> logsBetween(DateTime from, DateTime to) async {
+  static Future<List<MLog>> logsBetween(MGroup g, DateTime from, DateTime to) async {
     final s = await logs
         .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(from.subtract(const Duration(days: 7))))
         .where('start', isLessThan: Timestamp.fromDate(to))
         .get();
-    return s.docs.map((d) => MLog.fromDoc(d)).toList();
+    return s.docs.map((d) => MLog.fromDoc(d)).where((l) => g.owns(l.group)).toList();
   }
 
-  static Future<List<MEntry>> entriesBetween(DateTime from, DateTime to) async {
+  static Future<List<MEntry>> entriesBetween(MGroup g, DateTime from, DateTime to) async {
     final s = await entries.where('t', isGreaterThanOrEqualTo: Timestamp.fromDate(from)).where('t', isLessThan: Timestamp.fromDate(to)).get();
-    return s.docs.map((d) => MEntry.fromDoc(d)).toList();
+    return s.docs.map((d) => MEntry.fromDoc(d)).where((e) => g.owns(e.group)).toList();
   }
 
-  static Future<void> addMachine(String name, String line, int order) => col.add({
+  static Future<void> addMachine(MGroup g, String name, String line, int order) => col.add({
+        'group': g.key,
         'name': name,
         'line': line,
         'order': order,
@@ -637,6 +747,7 @@ class MachineOps {
   static CollectionReference<Map<String, dynamic>> get jobs => db.collection('machineJobs');
 
   static Map<String, dynamic> _logData(LineMachine m, String key, String label, String note, DateTime now, String jobId, String orderNo, String productCode, int workers, int daily) => {
+        'group': m.group,
         'machineId': m.id,
         'machineName': m.name,
         'line': m.line,
@@ -657,6 +768,7 @@ class MachineOps {
       };
 
   static Map<String, dynamic> _entryData(LineMachine m, String kind, DateTime now, {double qty = 0, String? unit, String text = '', String? jobId, String? orderNo, String? productCode, int? workers, int? daily}) => {
+        'group': m.group,
         'machineId': m.id,
         'machineName': m.name,
         'line': m.line,
@@ -708,6 +820,7 @@ class MachineOps {
     batch.update(col.doc(m.id), upd);
     if (alarm) {
       batch.set(db.collection('machineAlerts').doc(), {
+        'group': m.group,
         'machineId': m.id,
         'machineName': m.name,
         'line': m.line,
@@ -727,6 +840,7 @@ class MachineOps {
     final batch = db.batch();
     final job = jobs.doc();
     batch.set(job, {
+      'group': m.group,
       'machineId': m.id,
       'machineName': m.name,
       'line': m.line,
@@ -741,6 +855,10 @@ class MachineOps {
       'finishNote': '',
       'qtyAdet': 0,
       'qtyKg': 0,
+      'fpAdet': 0,
+      'fpKg': 0,
+      'fuAdet': 0,
+      'fuKg': 0,
       'workers': workers,
       'daily': daily,
       'runSec': 0,
@@ -759,6 +877,10 @@ class MachineOps {
       'jobStartedAt': Timestamp.fromDate(now),
       'jobAdet': 0,
       'jobKg': 0,
+      'jobFpAdet': 0,
+      'jobFpKg': 0,
+      'jobFuAdet': 0,
+      'jobFuKg': 0,
     });
     batch.update(col.doc(m.id), upd);
     batch.set(entries.doc(),
@@ -810,10 +932,12 @@ class MachineOps {
     final sum = await _summary(m.jobId, now);
     final batch = db.batch();
     final upd = _switchLog(batch, m, now, kOffKey, 'Kapalı', 'Sipariş bitti', jobId: '', orderNo: '', productCode: '', workers: 0, daily: 0);
-    upd.addAll({'jobId': '', 'orderNo': '', 'productCode': '', 'jobStatus': '', 'jobStartedAt': null, 'jobAdet': 0, 'jobKg': 0, 'workers': 0, 'daily': 0});
+    upd.addAll({'jobId': '', 'orderNo': '', 'productCode': '', 'jobStatus': '', 'jobStartedAt': null, 'jobAdet': 0, 'jobKg': 0,
+      'jobFpAdet': 0, 'jobFpKg': 0, 'jobFuAdet': 0, 'jobFuKg': 0, 'workers': 0, 'daily': 0});
     batch.update(col.doc(m.id), upd);
     batch.update(jobs.doc(m.jobId), {'status': 'bitti', 'finishedAt': Timestamp.fromDate(now), 'finishNote': note, ...sum});
-    batch.set(entries.doc(), _entryData(m, 'is_bitti', now, text: 'Sipariş bitti · ${m.jobQtyText}${note.isEmpty ? '' : ' · Not: $note'}'));
+    final fire = m.jobFireText;
+    batch.set(entries.doc(), _entryData(m, 'is_bitti', now, text: 'Sipariş bitti · ${m.jobQtyText}${fire.isEmpty ? '' : ' · $fire'}${note.isEmpty ? '' : ' · Not: $note'}'));
     await batch.commit();
   }
 
@@ -850,19 +974,39 @@ class MachineOps {
     await batch.commit();
   }
 
-  static Future<void> addProduction(LineMachine m, double qty, String unit, String note) async {
+  // Üretim girişi: miktar ve / veya paket fire, ürün fire (her biri adet ya da kg)
+  static Future<void> addProduction(LineMachine m, double qty, String unit, String note,
+      {double fp = 0, String fpUnit = 'adet', double fu = 0, String fuUnit = 'adet'}) async {
     final now = DateTime.now();
     final batch = db.batch();
-    batch.set(entries.doc(), _entryData(m, 'uretim', now, qty: qty, unit: unit, text: note));
+    final data = _entryData(m, 'uretim', now, qty: qty, unit: unit, text: note);
+    data.addAll({'fp': fp, 'fpUnit': fpUnit, 'fu': fu, 'fuUnit': fuUnit});
+    batch.set(entries.doc(), data);
     final f = unit == 'kg' ? 'Kg' : 'Adet';
-    batch.update(col.doc(m.id), {'job$f': FieldValue.increment(qty), if (unit != m.unit) 'unit': unit});
-    if (m.hasJob) batch.update(jobs.doc(m.jobId), {'qty$f': FieldValue.increment(qty)});
+    final mu = <String, dynamic>{if (unit != m.unit && qty > 0) 'unit': unit};
+    final ju = <String, dynamic>{};
+    if (qty > 0) {
+      mu['job$f'] = FieldValue.increment(qty);
+      ju['qty$f'] = FieldValue.increment(qty);
+    }
+    if (fp > 0) {
+      final k = fpUnit == 'kg' ? 'Kg' : 'Adet';
+      mu['jobFp$k'] = FieldValue.increment(fp);
+      ju['fp$k'] = FieldValue.increment(fp);
+    }
+    if (fu > 0) {
+      final k = fuUnit == 'kg' ? 'Kg' : 'Adet';
+      mu['jobFu$k'] = FieldValue.increment(fu);
+      ju['fu$k'] = FieldValue.increment(fu);
+    }
+    if (mu.isNotEmpty) batch.update(col.doc(m.id), mu);
+    if (m.hasJob && ju.isNotEmpty) batch.update(jobs.doc(m.jobId), ju);
     await batch.commit();
   }
 
   // Devam eden işler canlı; bitenler seçili geçmiş aralığından
-  static Stream<List<MJob>> jobsStream() {
-    List<MJob> conv(QuerySnapshot<Map<String, dynamic>> s) => s.docs.map((d) => MJob.fromDoc(d)).toList();
+  static Stream<List<MJob>> jobsStream(MGroup g) {
+    List<MJob> conv(QuerySnapshot<Map<String, dynamic>> s) => s.docs.map((d) => MJob.fromDoc(d)).where((j) => g.owns(j.group)).toList();
     final active = jobs.where('status', whereIn: ['acik', 'gun_bitti']).snapshots().map(conv);
     final done = jobs.where('finishedAt', isGreaterThanOrEqualTo: histFrom()).snapshots().map((s) => conv(s).where((j) => j.finished).toList());
     return mergeLists<MJob>([active, done], (j) => j.id).map((l) {
@@ -886,7 +1030,8 @@ class MachineOps {
 class MachineHome extends StatelessWidget {
   final AppUser me;
   final Widget? nav;
-  const MachineHome({super.key, required this.me, this.nav});
+  final MGroup group;
+  const MachineHome({super.key, required this.me, this.nav, required this.group});
 
   @override
   Widget build(BuildContext context) {
@@ -895,7 +1040,7 @@ class MachineHome extends StatelessWidget {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Bind · Makine takip', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            Text('Bind · ${group.title}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
             Text('${me.name} · ${me.roleLabel}', style: const TextStyle(fontSize: 12, color: Color(0xFFADB5BD))),
           ],
         ),
@@ -903,30 +1048,31 @@ class MachineHome extends StatelessWidget {
           IconButton(
             tooltip: 'Sipariş arşivi',
             icon: const Icon(Icons.inventory_outlined),
-            onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MachineJobsPage())),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MachineJobsPage(group: group))),
           ),
           IconButton(
             tooltip: 'Rapor ve Excel',
             icon: const Icon(Icons.bar_chart),
-            onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MachineReportPage())),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MachineReportPage(group: group))),
           ),
-          if (canMachineManage(me))
+          if (canMachineManage(me, group))
             IconButton(
               tooltip: 'Makineler, nedenler, vardiyalar',
               icon: const Icon(Icons.settings),
-              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MachineSettingsPage())),
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MachineSettingsPage(group: group))),
             ),
           ...commonActions(me),
         ],
       ),
       bottomNavigationBar: nav,
-      body: const MachineLive(),
+      body: MachineLive(key: ValueKey('live-${group.key}'), group: group),
     );
   }
 }
 
 class MachineLive extends StatefulWidget {
-  const MachineLive({super.key});
+  final MGroup group;
+  const MachineLive({super.key, required this.group});
 
   @override
   State<MachineLive> createState() => _MachineLiveState();
@@ -934,10 +1080,11 @@ class MachineLive extends StatefulWidget {
 
 class _MachineLiveState extends State<MachineLive> {
   late final DateTime _from = dayStart(DateTime.now()).subtract(const Duration(days: 2));
-  late final Stream<List<MLog>> _logs = MachineOps.logsSince(_from);
-  late final Stream<List<MEntry>> _entries = MachineOps.entriesSince(_from);
-  late final Stream<List<LineMachine>> _machines = MachineOps.machinesStream();
-  late final Stream<List<MReason>> _reasons = MachineOps.reasonsStream();
+  MGroup get g => widget.group;
+  late final Stream<List<MLog>> _logs = MachineOps.logsSince(g, _from);
+  late final Stream<List<MEntry>> _entries = MachineOps.entriesSince(g, _from);
+  late final Stream<List<LineMachine>> _machines = MachineOps.machinesStream(g);
+  late final Stream<List<MReason>> _reasons = MachineOps.reasonsStream(g);
   late final Stream<List<MShift>> _shifts = MachineOps.shiftsStream();
   Timer? _tick;
 
@@ -968,9 +1115,9 @@ class _MachineLiveState extends State<MachineLive> {
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: Text(
-                canMachineManage(currentUser)
+                canMachineManage(currentUser, g)
                     ? 'Henüz makine eklenmedi.\nSağ üstteki ayar simgesinden makineleri ekleyin.'
-                    : 'Size atanmış hatta makine yok. Admin size hat atadığında makineler burada görünecek.',
+                    : 'Size atanmış ${g.lineLower} içinde makine yok. Admin size ${g.lineLower} atadığında makineler burada görünecek.',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: kMuted, fontSize: 15),
               ),
@@ -1013,7 +1160,7 @@ class _MachineLiveState extends State<MachineLive> {
                             lastLine = m.line;
                             children.add(Padding(
                               padding: const EdgeInsets.fromLTRB(2, 6, 0, 6),
-                              child: Text(m.line.isEmpty ? 'Hat belirtilmemiş' : m.line, style: const TextStyle(fontWeight: FontWeight.w700, color: kMuted)),
+                              child: Text(m.line.isEmpty ? g.noLine : m.line, style: const TextStyle(fontWeight: FontWeight.w700, color: kMuted)),
                             ));
                           }
                           children.add(Padding(
@@ -1050,7 +1197,7 @@ class _MachineCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = mStateColor(m.state);
     final st = stat;
-    final enter = canMachineEnter(currentUser);
+    final enter = canMachineEnter(currentUser, m.grp);
     return Card(
       margin: EdgeInsets.zero,
       color: m.off ? const Color(0xFFF8F9FA) : Colors.white,
@@ -1078,11 +1225,13 @@ class _MachineCard extends StatelessWidget {
               Text('Sipariş ${m.orderNo} · ${m.productCode}${m.jobStatus == 'gun_bitti' ? ' · gün bitti' : ''}',
                   style: const TextStyle(fontWeight: FontWeight.w700)),
               Text('${m.workers} çalışan + ${m.daily} günlükçü · bu sipariş: ${m.jobQtyText}', style: const TextStyle(fontSize: 13)),
+              if (m.jobFireText.isNotEmpty)
+                Text('Fire: ${m.jobFireText}', style: const TextStyle(fontSize: 13, color: Color(0xFFC92A2A))),
             ] else
               const Text('Aktif sipariş yok', style: TextStyle(color: kMuted, fontWeight: FontWeight.w600)),
             if (!m.off || (st?.tracked ?? 0) > 0)
               Text(
-                'Bu vardiya: verim %${(st?.efficiency ?? 0).toStringAsFixed(0)} · çalışma ${fmtSec(st?.run ?? 0)} · duruş ${fmtSec(st?.stopTotal ?? 0)} · üretim ${st?.qtyText ?? '—'}',
+                'Bu vardiya: verim %${(st?.efficiency ?? 0).toStringAsFixed(0)} · çalışma ${fmtSec(st?.run ?? 0)} · duruş ${fmtSec(st?.stopTotal ?? 0)} · üretim ${st?.qtyText ?? '—'}${(st?.hasFire ?? false) ? ' · ${st!.fireTxt}' : ''}',
                 style: const TextStyle(color: kMuted, fontSize: 13),
               ),
             Text(m.off ? 'Kapalı · ${fmtDT(m.since)}' : '${m.by.isEmpty ? '' : '${m.by} · '}${fmtDT(m.since)}${enter ? ' · dokunun' : ''}',
@@ -1114,7 +1263,7 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
             Text(m.name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
             Text(
               m.hasJob
-                  ? 'Sipariş ${m.orderNo} · ${m.productCode} · ${m.workers}+${m.daily} kişi · ${m.jobQtyText}'
+                  ? 'Sipariş ${m.orderNo} · ${m.productCode} · ${m.workers}+${m.daily} kişi · ${m.jobQtyText}${m.jobFireText.isEmpty ? '' : ' · ${m.jobFireText}'}'
                   : 'Şu an: ${m.stateLabel} · aktif sipariş yok',
               style: const TextStyle(color: kMuted),
             ),
@@ -1124,7 +1273,7 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
             if (!m.hasJob) _actBtn(c, 'yeni', 'Yeni sipariş başlat', Icons.play_arrow, kGreen),
             if (m.hasJob && m.jobStatus != 'gun_bitti') ...[
               Row(children: [
-                Expanded(child: _actBtn(c, 'uretim', 'Üretim gir', Icons.add, kOrange)),
+                Expanded(child: _actBtn(c, 'uretim', 'Üretim / fire gir', Icons.add, kOrange)),
                 const SizedBox(width: 8),
                 Expanded(child: _actBtn(c, 'kisi', 'Kişi sayısı', Icons.groups, kDark)),
               ]),
@@ -1355,49 +1504,84 @@ Future<void> askEditJob(BuildContext context, LineMachine m) async {
 
 Future<void> askProduction(BuildContext context, LineMachine m) async {
   final qty = TextEditingController();
+  final fpC = TextEditingController();
+  final fuC = TextEditingController();
   final note = TextEditingController();
   String unit = m.unit;
+  String fpUnit = m.unit;
+  String fuUnit = m.unit;
+  Widget unitSel(String v, void Function(String) on) => SegmentedButton<String>(
+        showSelectedIcon: false,
+        style: const ButtonStyle(visualDensity: VisualDensity.compact),
+        segments: [for (final e in kMUnits.entries) ButtonSegment<String>(value: e.key, label: Text(e.value))],
+        selected: {v},
+        onSelectionChanged: (x) => on(x.first),
+      );
+  Widget qtyRow(TextEditingController c, String label, String u, void Function(String) on, {bool focus = false}) => Row(children: [
+        Expanded(
+          child: TextField(
+            controller: c,
+            autofocus: focus,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: InputDecoration(labelText: label, isDense: true),
+          ),
+        ),
+        const SizedBox(width: 8),
+        unitSel(u, on),
+      ]);
   final ok = await showDialog<bool>(
     context: context,
     builder: (d) => StatefulBuilder(
       builder: (d, setS) => AlertDialog(
-        title: Text('Üretim gir · ${m.name}'),
+        title: Text('Üretim / fire gir · ${m.name}'),
         content: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('Sipariş ${m.orderNo} · ${m.productCode} · şu ana kadar: ${m.jobQtyText}', style: const TextStyle(color: kMuted)),
+            Text('Sipariş ${m.orderNo} · ${m.productCode} · şu ana kadar: ${m.jobQtyText}${m.jobFireText.isEmpty ? '' : ' · ${m.jobFireText}'}',
+                style: const TextStyle(color: kMuted)),
+            const SizedBox(height: 12),
+            qtyRow(qty, 'Üretim miktarı', unit, (v) => setS(() => unit = v), focus: true),
+            const SizedBox(height: 12),
+            qtyRow(fpC, 'Paket fire', fpUnit, (v) => setS(() => fpUnit = v)),
+            const SizedBox(height: 12),
+            qtyRow(fuC, 'Ürün fire', fuUnit, (v) => setS(() => fuUnit = v)),
+            const SizedBox(height: 6),
+            const Text('Sadece doldurduğunuz alanlar kaydedilir. Yalnız fire de girebilirsiniz.', style: TextStyle(color: kMuted, fontSize: 12)),
             const SizedBox(height: 10),
-            SegmentedButton<String>(
-              segments: [for (final e in kMUnits.entries) ButtonSegment<String>(value: e.key, label: Text(e.value))],
-              selected: {unit},
-              onSelectionChanged: (v) => setS(() => unit = v.first),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: qty,
-              autofocus: true,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: InputDecoration(labelText: 'Eklenen miktar (${kMUnits[unit]})'),
-            ),
-            const SizedBox(height: 10),
-            TextField(controller: note, decoration: const InputDecoration(labelText: 'Not (isteğe bağlı)')),
+            TextField(controller: note, decoration: const InputDecoration(labelText: 'Not (isteğe bağlı)', isDense: true)),
           ]),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Vazgeç')),
-          FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Ekle')),
+          FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Kaydet')),
         ],
       ),
     ),
   );
   if (ok != true) return;
-  final v = double.tryParse(qty.text.trim().replaceAll(',', '.'));
-  if (v == null || v <= 0) {
-    toast('Miktarı rakamla girin.');
+  double? parseQ(TextEditingController c) {
+    final t = c.text.trim().replaceAll(',', '.');
+    if (t.isEmpty) return 0;
+    final v = double.tryParse(t);
+    return (v == null || v < 0) ? null : v;
+  }
+
+  final v = parseQ(qty), fp = parseQ(fpC), fu = parseQ(fuC);
+  if (v == null || fp == null || fu == null) {
+    toast('Miktarları rakamla girin.');
+    return;
+  }
+  if (v == 0 && fp == 0 && fu == 0) {
+    toast('Üretim ya da fire miktarı girin.');
     return;
   }
   try {
-    await MachineOps.addProduction(m, v, unit, note.text.trim());
-    toast('${m.name}: +${fmtQty(v)} ${unit == 'kg' ? 'kg' : 'adet'}');
+    await MachineOps.addProduction(m, v, unit, note.text.trim(), fp: fp, fpUnit: fpUnit, fu: fu, fuUnit: fuUnit);
+    final parts = <String>[
+      if (v > 0) '+${fmtQty(v)} ${unit == 'kg' ? 'kg' : 'adet'}',
+      if (fp > 0) 'paket fire ${fmtQty(fp)} ${fpUnit == 'kg' ? 'kg' : 'adet'}',
+      if (fu > 0) 'ürün fire ${fmtQty(fu)} ${fuUnit == 'kg' ? 'kg' : 'adet'}',
+    ];
+    toast('${m.name}: ${parts.join(' · ')}');
   } catch (e) {
     toast('Kaydedilemedi: $e');
   }
@@ -1408,13 +1592,15 @@ Future<void> askProduction(BuildContext context, LineMachine m) async {
 // ---------------------------------------------------------------------------
 
 class MachineReportPage extends StatefulWidget {
-  const MachineReportPage({super.key});
+  final MGroup group;
+  const MachineReportPage({super.key, required this.group});
 
   @override
   State<MachineReportPage> createState() => _MachineReportPageState();
 }
 
 class _MachineReportPageState extends State<MachineReportPage> {
+  MGroup get g => widget.group;
   DateTime _from = dayStart(DateTime.now());
   DateTime _to = dayStart(DateTime.now());
   List<MShift> _shifts = List<MShift>.from(kDefaultShifts);
@@ -1450,15 +1636,16 @@ class _MachineReportPageState extends State<MachineReportPage> {
     setState(() => _loading = true);
     try {
       final ms = await MachineOps.col.get();
-      _machines = MachineOps._sorted(ms.docs.map((d) => LineMachine.fromDoc(d)).where((m) => lineVisible(currentUser, m.line)));
+      _machines = MachineOps._sorted(
+          filterVisible<LineMachine>(currentUser, g, ms.docs.map((d) => LineMachine.fromDoc(d)).where((m) => g.owns(m.group)), (m) => m.line));
       final w = _wins;
       if (w.isEmpty) {
         _logs = [];
         _entries = [];
       } else {
         final end = w.last.e.isAfter(DateTime.now()) ? DateTime.now().add(const Duration(minutes: 1)) : w.last.e;
-        _logs = await MachineOps.logsBetween(w.first.s, end);
-        _entries = await MachineOps.entriesBetween(w.first.s, end);
+        _logs = await MachineOps.logsBetween(g, w.first.s, end);
+        _entries = await MachineOps.entriesBetween(g, w.first.s, end);
       }
     } catch (e) {
       toast('Rapor yüklenemedi: $e');
@@ -1519,14 +1706,14 @@ class _MachineReportPageState extends State<MachineReportPage> {
   Widget build(BuildContext context) {
     final wins = _wins;
     final stats = _logs == null ? <String, MStat>{} : computeMStats(_visibleMachines, _fLogs, _fEntries, wins);
-    final list = stats.values.where((s) => s.tracked > 0 || s.qtyAdet > 0 || s.qtyKg > 0).toList()..sort((a, b) => '${a.line}${a.name}'.compareTo('${b.line}${b.name}'));
+    final list = stats.values.where((s) => s.hasData).toList()..sort((a, b) => '${a.line}${a.name}'.compareTo('${b.line}${b.name}'));
     final lines = _machines.map((m) => m.line).toSet().toList()..sort();
     return Scaffold(
-      appBar: AppBar(title: const Text('Makine raporu'), actions: [
+      appBar: AppBar(title: Text('${g.title} · rapor'), actions: [
         IconButton(
           tooltip: "Excel'e aktar",
           icon: const Icon(Icons.download),
-          onPressed: _logs == null ? null : () => exportMachineExcel(_visibleMachines, _fLogs, _fEntries, wins, _shift),
+          onPressed: _logs == null ? null : () => exportMachineExcel(g, _visibleMachines, _fLogs, _fEntries, wins, _shift),
         ),
       ]),
       body: ListView(padding: const EdgeInsets.all(16), children: [
@@ -1570,10 +1757,10 @@ class _MachineReportPageState extends State<MachineReportPage> {
           DropdownButtonFormField<String>(
             value: _line,
             isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Hat', isDense: true),
+            decoration: InputDecoration(labelText: g.lineLabel, isDense: true),
             items: [
-              const DropdownMenuItem<String>(value: '', child: Text('Tüm hatlar')),
-              for (final l in lines) DropdownMenuItem<String>(value: l, child: Text(l.isEmpty ? 'Hat belirtilmemiş' : l)),
+              DropdownMenuItem<String>(value: '', child: Text(g == kUretim ? 'Tüm bölgeler' : 'Tüm hatlar')),
+              for (final l in lines) DropdownMenuItem<String>(value: l, child: Text(l.isEmpty ? g.noLine : l)),
             ],
             onChanged: (v) => setState(() => _line = v ?? ''),
           ),
@@ -1613,6 +1800,7 @@ class _MachineReportPageState extends State<MachineReportPage> {
                 ),
                 const SizedBox(height: 6),
                 Text('Çalışma ${fmtSec(s.run)} · Duruş ${fmtSec(s.stopTotal)} · Üretim ${s.qtyText}', style: const TextStyle(color: kMuted, fontSize: 13)),
+                if (s.hasFire) Text('Fire: ${s.fireTxt}', style: const TextStyle(color: Color(0xFFC92A2A), fontSize: 13, fontWeight: FontWeight.w600)),
                 if (s.products.isNotEmpty) Text('Ürünler: ${s.products.join(', ')}', style: const TextStyle(color: kMuted, fontSize: 13)),
                 for (final e in (s.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))))
                   Padding(
@@ -1636,7 +1824,7 @@ class _MachineReportPageState extends State<MachineReportPage> {
 
 String fmtDay(DateTime d) => '${two(d.day)}.${two(d.month)}.${d.year}';
 
-Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, List<MEntry> entries, List<TimeWin> wins, MShift shift) async {
+Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog> logs, List<MEntry> entries, List<TimeWin> wins, MShift shift) async {
   try {
     if (wins.isEmpty) {
       toast('Seçilen aralıkta vardiya yok.');
@@ -1645,7 +1833,8 @@ Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, Lis
     toast('Makine raporu hazırlanıyor…');
     final now = DateTime.now();
     final stats = computeMStats(machines, logs, entries, wins);
-    final list = stats.values.where((s) => s.tracked > 0 || s.qtyAdet > 0 || s.qtyKg > 0).toList()..sort((a, b) => '${a.line}${a.name}'.compareTo('${b.line}${b.name}'));
+    final list = stats.values.where((s) => s.hasData).toList()..sort((a, b) => '${a.line}${a.name}'.compareTo('${b.line}${b.name}'));
+    final hl = g.lineLabel;
     final labels = <String>{};
     for (final s in list) {
       labels.addAll(s.stops.keys);
@@ -1661,42 +1850,46 @@ Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, Lis
     xl.CellValue n(int v) => xl.IntCellValue(v);
     xl.CellValue dbl(double v) => xl.DoubleCellValue((v * 10).round() / 10);
     int mins(int s) => (s / 60).round();
+    final fireHead = [t('Paket fire (adet)'), t('Paket fire (kg)'), t('Ürün fire (adet)'), t('Ürün fire (kg)')];
+    List<xl.CellValue?> fireCells(MStat s) => [dbl(s.fpAdet), dbl(s.fpKg), dbl(s.fuAdet), dbl(s.fuKg)];
 
-    sh.appendRow(<xl.CellValue?>[t('Makine raporu'), t('${fmtDay(wins.first.day)} – ${fmtDay(wins.last.day)}'), t('Vardiya: ${shift.label}')]);
+    sh.appendRow(<xl.CellValue?>[t('${g.title} raporu'), t('${fmtDay(wins.first.day)} – ${fmtDay(wins.last.day)}'), t('Vardiya: ${shift.label}')]);
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
-      t('Makine'), t('Hat'), t('İzlenen süre (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'),
+      t('Makine'), t(hl), t('İzlenen süre (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'),
       for (final l in lab) t('$l (dk)'),
-      t('Üretim (adet)'), t('Üretim (kg)'), t('Ürünler'),
+      t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead, t('Ürünler'),
     ]);
     for (final s in list) {
       sh.appendRow(<xl.CellValue?>[
         t(s.name), t(s.line), n(mins(s.tracked)), n(mins(s.run)), n(mins(s.stopTotal)), dbl(s.efficiency),
         for (final l in lab) n(mins(s.stops[l] ?? 0)),
-        dbl(s.qtyAdet), dbl(s.qtyKg), t(s.products.join(', ')),
+        dbl(s.qtyAdet), dbl(s.qtyKg), ...fireCells(s), t(s.products.join(', ')),
       ]);
     }
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[t('Verimlilik = çalışma ÷ (çalışma + duruş). Kapalı / vardiya dışı süreler raporlanmaz.')]);
 
     byShift.appendRow(<xl.CellValue?>[
-      t('Tarih'), t('Vardiya'), t('Makine'), t('Hat'), t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'), t('En çok duruş nedeni'),
+      t('Tarih'), t('Vardiya'), t('Makine'), t(hl), t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
+      t('En çok duruş nedeni'),
     ]);
     for (final w in wins) {
       final st = computeMStats(machines, logs, entries, [w]);
       for (final s in st.values.toList()..sort((a, b) => '${a.line}${a.name}'.compareTo('${b.line}${b.name}'))) {
-        if (s.tracked == 0 && s.qtyAdet == 0 && s.qtyKg == 0) continue;
+        if (!s.hasData) continue;
         final top = s.stops.entries.isEmpty ? null : (s.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
         byShift.appendRow(<xl.CellValue?>[
           t(fmtDay(w.day)), t('${_hmText(w.s.hour * 60 + w.s.minute)}–${_hmText(w.e.hour * 60 + w.e.minute)}'), t(s.name), t(s.line),
-          n(mins(s.run)), n(mins(s.stopTotal)), dbl(s.efficiency), dbl(s.qtyAdet), dbl(s.qtyKg),
+          n(mins(s.run)), n(mins(s.stopTotal)), dbl(s.efficiency), dbl(s.qtyAdet), dbl(s.qtyKg), ...fireCells(s),
           t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
         ]);
       }
     }
 
     prod.appendRow(<xl.CellValue?>[
-      t('Makine'), t('Hat'), t('Tarih saat'), t('İşlem'), t('Sipariş no'), t('Ürün kodu'), t('Miktar'), t('Birim'), t('Çalışan'), t('Günlükçü'), t('Toplam kişi'), t('Giren'), t('Not / değişiklik'),
+      t('Makine'), t(hl), t('Tarih saat'), t('İşlem'), t('Sipariş no'), t('Ürün kodu'), t('Miktar'), t('Birim'), t('Paket fire'), t('Birim'), t('Ürün fire'), t('Birim'),
+      t('Çalışan'), t('Günlükçü'), t('Toplam kişi'), t('Giren'), t('Not / değişiklik'),
     ]);
     final es = entries.where((e) => e.t != null && wins.any((w) => w.contains(e.t!))).toList()
       ..sort((a, b) {
@@ -1706,12 +1899,15 @@ Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, Lis
     for (final e in es) {
       prod.appendRow(<xl.CellValue?>[
         t(e.machineName), t(e.line), t(fmtFull(e.t)), t(e.kindLabel), t(e.orderNo), t(e.productCode),
-        e.isProd ? dbl(e.qty) : null, t(e.isProd ? (kMUnits[e.unit] ?? e.unit) : ''), n(e.workers), n(e.daily), n(e.workers + e.daily), t(e.by), t(e.text),
+        e.isProd && e.qty > 0 ? dbl(e.qty) : null, t(e.isProd && e.qty > 0 ? (kMUnits[e.unit] ?? e.unit) : ''),
+        e.fp > 0 ? dbl(e.fp) : null, t(e.fp > 0 ? (kMUnits[e.fpUnit] ?? e.fpUnit) : ''),
+        e.fu > 0 ? dbl(e.fu) : null, t(e.fu > 0 ? (kMUnits[e.fuUnit] ?? e.fuUnit) : ''),
+        n(e.workers), n(e.daily), n(e.workers + e.daily), t(e.by), t(e.text),
       ]);
     }
 
     det.appendRow(<xl.CellValue?>[
-      t('Makine'), t('Hat'), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Süre (dk)'), t('Sipariş no'), t('Ürün kodu'), t('Çalışan'), t('Günlükçü'), t('Giren'), t('Not'),
+      t('Makine'), t(hl), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Süre (dk)'), t('Sipariş no'), t('Ürün kodu'), t('Çalışan'), t('Günlükçü'), t('Giren'), t('Not'),
     ]);
     final ls = _withOpenLogs(machines, logs).where((l) => l.state != kOffKey).map((l) {
       var sec = 0;
@@ -1735,10 +1931,11 @@ Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, Lis
     // Sipariş bazlı (seçilen aralıkta)
     final xl.Sheet byJob = excel['Sipariş bazlı'];
     byJob.appendRow(<xl.CellValue?>[
-      t('Makine'), t('Hat'), t('Sipariş no'), t('Ürün kodu'), t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'),
+      t('Makine'), t(hl), t('Sipariş no'), t('Ürün kodu'), t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
       t('Kişi (son)'), t('En çok duruş nedeni'),
     ]);
     final jobKeys = <String, List<Object>>{};
+    final jobFire = <String, MStat>{};
     for (final x in ls) {
       final l = x.key;
       if (l.jobId.isEmpty) continue;
@@ -1760,6 +1957,7 @@ Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, Lis
       } else {
         k[3] = (k[3] as double) + e.qty;
       }
+      jobFire.putIfAbsent(e.jobId, () => MStat(e.jobId, '', '')).addFire(e);
     }
     for (final k in jobKeys.values) {
       final l = k[0] as MLog;
@@ -1769,7 +1967,8 @@ Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, Lis
       final top = mp.entries.isEmpty ? null : (mp.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
       byJob.appendRow(<xl.CellValue?>[
         t(l.machineName), t(l.line), t(l.orderNo), t(l.productCode), n(mins(run)), n(mins(stop)), dbl(run + stop == 0 ? 0 : run * 100 / (run + stop)),
-        dbl(k[3] as double), dbl(k[4] as double), n(k[5] as int), t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
+        dbl(k[3] as double), dbl(k[4] as double), ...fireCells(jobFire[l.jobId] ?? MStat('', '', '')),
+        n(k[5] as int), t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
       ]);
     }
 
@@ -1778,11 +1977,8 @@ Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, Lis
       toast('Excel oluşturulamadı.');
       return;
     }
-    final dir = await getTemporaryDirectory();
     final d0 = wins.first.day;
-    final file = File('${dir.path}/makine_raporu_${d0.year}${two(d0.month)}${two(d0.day)}.xlsx');
-    await file.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(file.path)], text: 'Makine raporu');
+    await shareBytes(bytes, '${g == kUretim ? 'uretim_makineleri' : 'sargi_makineleri'}_raporu_${d0.year}${two(d0.month)}${two(d0.day)}.xlsx', '${g.title} raporu');
   } catch (e) {
     toast('Excel hatası: $e');
   }
@@ -1793,11 +1989,13 @@ Future<void> exportMachineExcel(List<LineMachine> machines, List<MLog> logs, Lis
 // ---------------------------------------------------------------------------
 
 class MachineSettingsPage extends StatelessWidget {
-  const MachineSettingsPage({super.key});
+  final MGroup group;
+  const MachineSettingsPage({super.key, required this.group});
 
   Future<void> _machineDialog(BuildContext context, LineMachine? m, int nextOrder, List<String> lines) async {
     final name = TextEditingController(text: m?.name ?? '');
-    final line = TextEditingController(text: m?.line ?? '');
+    final line = TextEditingController(text: m?.line ?? (group.defaultLines.isNotEmpty ? group.defaultLines.first : ''));
+    final chips = <String>{...group.defaultLines, ...lines.where((x) => x.isNotEmpty)}.toList();
     final order = TextEditingController(text: '${m?.order ?? nextOrder}');
     final ok = await showDialog<bool>(
       context: context,
@@ -1807,10 +2005,12 @@ class MachineSettingsPage extends StatelessWidget {
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             TextField(controller: name, autofocus: true, decoration: const InputDecoration(labelText: 'Makine adı')),
             const SizedBox(height: 10),
-            TextField(controller: line, decoration: const InputDecoration(labelText: 'Hat (ör. Zemin kat, Draje paket hattı)')),
-            if (lines.isNotEmpty)
+            TextField(
+                controller: line,
+                decoration: InputDecoration(labelText: group == kUretim ? 'Bölge (ör. Zemin kat, 1. kat)' : 'Hat (ör. Draje paket hattı)')),
+            if (chips.isNotEmpty)
               Wrap(spacing: 6, children: [
-                for (final l in lines.where((x) => x.isNotEmpty)) ActionChip(label: Text(l), onPressed: () => line.text = l),
+                for (final l in chips) ActionChip(label: Text(l), onPressed: () => line.text = l),
               ]),
             const SizedBox(height: 10),
             TextField(controller: order, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Sıra')),
@@ -1826,7 +2026,7 @@ class MachineSettingsPage extends StatelessWidget {
     try {
       final o = int.tryParse(order.text.trim()) ?? nextOrder;
       if (m == null) {
-        await MachineOps.addMachine(name.text.trim(), line.text.trim(), o);
+        await MachineOps.addMachine(group, name.text.trim(), line.text.trim(), o);
       } else {
         await MachineOps.editMachine(m, name.text.trim(), line.text.trim(), o);
       }
@@ -1869,7 +2069,7 @@ class MachineSettingsPage extends StatelessWidget {
       nl[index!] = MReason(r.key, c.text.trim(), alarm);
     }
     try {
-      await MachineOps.saveReasons(nl);
+      await MachineOps.saveReasons(group, nl);
     } catch (e) {
       toast('Kaydedilemedi: $e');
     }
@@ -1961,14 +2161,14 @@ class MachineSettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Makine takip ayarları')),
+      appBar: AppBar(title: Text('${group.title} · ayarlar')),
       body: StreamBuilder<List<LineMachine>>(
-        stream: MachineOps.machinesStream(all: true),
+        stream: MachineOps.machinesStream(group, all: true),
         builder: (context, ms) {
           final machines = ms.data ?? const <LineMachine>[];
           final lines = machines.map((m) => m.line).toSet().toList()..sort();
           return StreamBuilder<List<MReason>>(
-            stream: MachineOps.reasonsStream(),
+            stream: MachineOps.reasonsStream(group),
             builder: (context, rs) {
               final reasons = rs.data ?? kDefaultMReasons;
               return StreamBuilder<List<MShift>>(
@@ -1976,11 +2176,11 @@ class MachineSettingsPage extends StatelessWidget {
                 builder: (context, ss) {
                   final shifts = ss.data ?? kDefaultShifts;
                   return ListView(padding: const EdgeInsets.all(16), children: [
-                    _title('Makineler', 'Kullanıcıların hangi hatları göreceğini Kullanıcılar sayfasından atayın.'),
+                    _title('Makineler', 'Kullanıcıların hangi ${group.lineLower} bilgilerini göreceğini Kullanıcılar sayfasından atayın.'),
                     for (final m in machines)
                       _row(
                         title: Text(m.name),
-                        subtitle: '${m.line.isEmpty ? 'Hat yok' : m.line} · sıra ${m.order}',
+                        subtitle: '${m.line.isEmpty ? group.noLine : m.line} · sıra ${m.order}',
                         onEdit: () => _machineDialog(context, m, m.order, lines),
                         onDelete: () async {
                           if (!await confirm(context, 'Makine silinsin mi?', '${m.name} listeden kalkar. Geçmiş kayıtları raporlarda kalır.', 'Sil')) return;
@@ -1997,7 +2197,7 @@ class MachineSettingsPage extends StatelessWidget {
                       label: const Text('Makine ekle'),
                     ),
                     const SizedBox(height: 24),
-                    _title('Vardiyalar', 'İlk sıradaki vardiya canlı ekranda kullanılır. Raporda istediğinizi seçebilirsiniz.'),
+                    _title('Vardiyalar', 'Vardiyalar Sargı ve Üretim makinelerinde ortaktır. İlk sıradaki vardiya canlı ekranda kullanılır.'),
                     for (var i = 0; i < shifts.length; i++)
                       _row(
                         leading: Icon(Icons.schedule, color: i == 0 ? kOrange : kMuted),
@@ -2024,7 +2224,7 @@ class MachineSettingsPage extends StatelessWidget {
                       label: const Text('Vardiya ekle'),
                     ),
                     const SizedBox(height: 24),
-                    _title('Duruş nedenleri', '"Çalışıyor" ve "Kapalı / vardiya dışı" sabittir. Zil simgesi olanlar alarm gönderir.'),
+                    _title('Duruş nedenleri (${group.title})', '"Çalışıyor" ve "Kapalı / vardiya dışı" sabittir. Zil simgesi olanlar alarm gönderir.'),
                     for (var i = 0; i < reasons.length; i++)
                       _row(
                         leading: Icon(reasons[i].alarm ? Icons.notifications_active : Icons.notifications_off_outlined,
@@ -2036,7 +2236,7 @@ class MachineSettingsPage extends StatelessWidget {
                           if (!await confirm(context, 'Neden silinsin mi?', '"${reasons[i].label}" listeden kalkar. Geçmiş kayıtlar raporda kalır.', 'Sil')) return;
                           final nl = List<MReason>.from(reasons)..removeAt(i);
                           try {
-                            await MachineOps.saveReasons(nl);
+                            await MachineOps.saveReasons(group, nl);
                           } catch (e) {
                             toast('Silinemedi: $e');
                           }
@@ -2061,15 +2261,20 @@ class MachineSettingsPage extends StatelessWidget {
 // Kullanıcılar sayfasından: kullanıcının göreceği hatları seç
 Future<void> pickUserLines(BuildContext context, AppUser u) async {
   List<String> all;
+  final where = <String, Set<String>>{}; // hat / bölge -> hangi panel
   try {
     final s = await MachineOps.col.get();
-    all = s.docs.map((d) => (d.data()['line'] ?? '').toString()).toSet().toList()..sort();
+    for (final d in s.docs) {
+      final m = LineMachine.fromDoc(d);
+      where.putIfAbsent(m.line, () => <String>{}).add(m.grp.title);
+    }
+    all = where.keys.toList()..sort();
   } catch (e) {
     toast('Hatlar okunamadı: $e');
     return;
   }
   if (all.isEmpty) {
-    toast('Önce Makine takip ayarlarından makine ve hat ekleyin.');
+    toast('Önce makine ayarlarından makine ve hat / bölge ekleyin.');
     return;
   }
   if (!context.mounted) return;
@@ -2078,16 +2283,17 @@ Future<void> pickUserLines(BuildContext context, AppUser u) async {
     context: context,
     builder: (d) => StatefulBuilder(
       builder: (d, setS) => AlertDialog(
-        title: Text('${u.name} · görebileceği hatlar'),
+        title: Text('${u.name} · görebileceği hat / bölgeler'),
         content: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Hiçbiri seçilmezse tüm hatları görür. Admin ve "yönetir" yetkisi olanlar her zaman tümünü görür.',
+            const Text('Hiçbiri seçilmezse tümünü görür. Admin ve "yönetir" yetkisi olanlar her zaman tümünü görür.',
                 style: TextStyle(color: kMuted, fontSize: 12)),
             for (final l in all)
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
                 value: sel.contains(l),
-                title: Text(l.isEmpty ? 'Hat belirtilmemiş' : l),
+                title: Text(l.isEmpty ? 'Belirtilmemiş' : l),
+                subtitle: Text(where[l]!.join(', '), style: const TextStyle(fontSize: 12)),
                 onChanged: (v) => setS(() => v == true ? sel.add(l) : sel.remove(l)),
               ),
           ]),
@@ -2114,13 +2320,15 @@ Future<void> pickUserLines(BuildContext context, AppUser u) async {
 // ---------------------------------------------------------------------------
 
 class MachineJobsPage extends StatefulWidget {
-  const MachineJobsPage({super.key});
+  final MGroup group;
+  const MachineJobsPage({super.key, required this.group});
 
   @override
   State<MachineJobsPage> createState() => _MachineJobsPageState();
 }
 
 class _MachineJobsPageState extends State<MachineJobsPage> {
+  MGroup get g => widget.group;
   String _q = '';
   int _filter = 0; // 0 tümü, 1 devam eden, 2 biten
   List<MJob> _last = const [];
@@ -2131,7 +2339,7 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
   Stream<List<MJob>> get _stream {
     if (_s == null || _sd != gHistDays.value) {
       _sd = gHistDays.value;
-      _s = MachineOps.jobsStream();
+      _s = MachineOps.jobsStream(g);
     }
     return _s!;
   }
@@ -2145,7 +2353,7 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
       final r = await findInHistory('machineJobs', 'orderNo', _q);
       setState(() {
         _extra.removeWhere((x) => r.any((d) => d.id == x.id));
-        _extra.addAll(r.map((d) => MJob.fromDoc(d)));
+        _extra.addAll(r.map((d) => MJob.fromDoc(d)).where((j) => g.owns(j.group)));
       });
       toast(r.isEmpty ? 'Tüm geçmişte bu numarayla sipariş yok.' : '${r.length} kayıt bulundu');
     } catch (e) {
@@ -2155,7 +2363,7 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
 
   List<MJob> _apply(List<MJob> all) {
     final q = _q.trim().toLowerCase();
-    return all.where((j) => lineVisible(currentUser, j.line)).where((j) => _filter == 0 || (_filter == 1 ? !j.finished : j.finished)).where((j) {
+    return filterVisible<MJob>(currentUser, g, all, (j) => j.line).where((j) => _filter == 0 || (_filter == 1 ? !j.finished : j.finished)).where((j) {
       if (q.isEmpty) return true;
       return '${j.orderNo} ${j.productCode} ${j.machineName} ${j.line} ${j.finishNote}'.toLowerCase().contains(q);
     }).toList();
@@ -2164,8 +2372,8 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Sipariş arşivi'), actions: [
-        IconButton(tooltip: "Excel'e aktar", icon: const Icon(Icons.download), onPressed: () => exportJobsExcel(_last)),
+      appBar: AppBar(title: Text('${g.title} · sipariş arşivi'), actions: [
+        IconButton(tooltip: "Excel'e aktar", icon: const Icon(Icons.download), onPressed: () => exportJobsExcel(g, _last)),
       ]),
       body: ValueListenableBuilder<int>(
         valueListenable: gHistDays,
@@ -2217,6 +2425,7 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
                         style: const TextStyle(color: kMuted, fontSize: 13)),
                     Text('Üretim: ${j.qtyText}${j.finished || j.runSec > 0 ? ' · verim %${j.efficiency.toStringAsFixed(0)}' : ''}',
                         style: const TextStyle(fontWeight: FontWeight.w600)),
+                    if (j.fireTxt.isNotEmpty) Text('Fire: ${j.fireTxt}', style: const TextStyle(color: Color(0xFFC92A2A), fontSize: 13)),
                   ])),
                 ),
               ),
@@ -2253,6 +2462,7 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
                 if (j.finishNote.isNotEmpty) Text('Bitiş notu: ${j.finishNote}', style: const TextStyle(fontStyle: FontStyle.italic)),
                 const Divider(height: 20),
                 Text('Üretim: ${j.qtyText}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                if (j.fireTxt.isNotEmpty) Text('Fire: ${j.fireTxt}', style: const TextStyle(color: Color(0xFFC92A2A), fontWeight: FontWeight.w600)),
                 Text('Verimlilik: %${eff.toStringAsFixed(1)} · çalışma ${fmtSec(run)} · duruş ${fmtSec(stop)}',
                     style: const TextStyle(fontWeight: FontWeight.w600)),
                 if (snap.connectionState == ConnectionState.waiting) const LinearProgressIndicator(),
@@ -2261,7 +2471,7 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
                     padding: const EdgeInsets.only(top: 3),
                     child: Row(children: [Expanded(child: Text(e.key)), Text(fmtSec(e.value), style: const TextStyle(fontWeight: FontWeight.w600))]),
                   ),
-                if (canMachineManage(currentUser)) ...[
+                if (canMachineManage(currentUser, mGroupOf(j.group))) ...[
                   const SizedBox(height: 12),
                   if (j.finished)
                     OutlinedButton.icon(
@@ -2291,7 +2501,7 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
   );
 }
 
-Future<void> exportJobsExcel(List<MJob> jobs) async {
+Future<void> exportJobsExcel(MGroup g, List<MJob> jobs) async {
   try {
     if (jobs.isEmpty) {
       toast('Aktarılacak sipariş yok.');
@@ -2314,7 +2524,8 @@ Future<void> exportJobsExcel(List<MJob> jobs) async {
     }
     final lab = labels.toList()..sort();
     sh.appendRow(<xl.CellValue?>[
-      t('Sipariş no'), t('Ürün kodu'), t('Makine'), t('Hat'), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Gün sayısı'), t('Üretim (adet)'), t('Üretim (kg)'),
+      t('Sipariş no'), t('Ürün kodu'), t('Makine'), t(g.lineLabel), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Gün sayısı'), t('Üretim (adet)'), t('Üretim (kg)'),
+      t('Paket fire (adet)'), t('Paket fire (kg)'), t('Ürün fire (adet)'), t('Ürün fire (kg)'),
       t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), for (final l in lab) t('$l (dk)'), t('Son çalışan'), t('Son günlükçü'), t('Başlatan'), t('Bitiş notu'),
     ]);
     for (final j in jobs) {
@@ -2324,7 +2535,7 @@ Future<void> exportJobsExcel(List<MJob> jobs) async {
       final stop = st.values.fold(0, (a, b) => a + b);
       sh.appendRow(<xl.CellValue?>[
         t(j.orderNo), t(j.productCode), t(j.machineName), t(j.line), t(j.statusLabel), t(fmtFull(j.startedAt)), t(j.finished ? fmtFull(j.finishedAt) : ''),
-        n(j.dayCount), dbl(j.qtyAdet), dbl(j.qtyKg), n(mins(run)), n(mins(stop)), dbl(run + stop == 0 ? 0 : run * 100 / (run + stop)),
+        n(j.dayCount), dbl(j.qtyAdet), dbl(j.qtyKg), dbl(j.fpAdet), dbl(j.fpKg), dbl(j.fuAdet), dbl(j.fuKg), n(mins(run)), n(mins(stop)), dbl(run + stop == 0 ? 0 : run * 100 / (run + stop)),
         for (final l in lab) n(mins(st[l] ?? 0)), n(j.workers), n(j.daily), t(j.by), t(j.finishNote),
       ]);
     }
@@ -2333,11 +2544,8 @@ Future<void> exportJobsExcel(List<MJob> jobs) async {
       toast('Excel oluşturulamadı.');
       return;
     }
-    final dir = await getTemporaryDirectory();
     final now = DateTime.now();
-    final file = File('${dir.path}/siparis_arsivi_${now.year}${two(now.month)}${two(now.day)}.xlsx');
-    await file.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(file.path)], text: 'Makine sipariş arşivi');
+    await shareBytes(bytes, '${g == kUretim ? 'uretim' : 'sargi'}_siparis_arsivi_${now.year}${two(now.month)}${two(now.day)}.xlsx', '${g.title} sipariş arşivi');
   } catch (e) {
     toast('Excel hatası: $e');
   }

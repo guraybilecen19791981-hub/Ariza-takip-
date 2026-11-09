@@ -2034,11 +2034,8 @@ Future<void> exportPackExcel() async {
       toast('Excel oluşturulamadı.');
       return;
     }
-    final dir = await getTemporaryDirectory();
     final now = DateTime.now();
-    final file = File('${dir.path}/bind_paketleme_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}.xlsx');
-    await file.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(file.path)], text: 'Bind paketleme kayıtları');
+    await shareBytes(bytes, 'bind_paketleme_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}.xlsx', 'Bind paketleme kayıtları');
   } catch (e) {
     toast('Excel hatası: $e');
   }

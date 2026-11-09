@@ -303,7 +303,9 @@ Stream<List<PalletOrder>> palletStream() {
   final open = PalletOps.col.where('status', isEqualTo: 'acik').snapshots().map(conv);
   final ready = PalletOps.col.where('shippedAt', isNull: true).snapshots().map((s) => conv(s).where((o) => o.isFinished).toList());
   final shipped = PalletOps.col.where('shippedAt', isGreaterThanOrEqualTo: histFrom()).snapshots().map(conv);
-  return mergeLists<PalletOrder>([open, ready, shipped], (o) => o.id).map((l) {
+  // eski sürümle bitirilip sevk alanı hiç yazılmamış paletler de "sevke hazır"da görünsün
+  final finished = PalletOps.col.where('finishedAt', isGreaterThanOrEqualTo: histFrom()).snapshots().map((s) => conv(s).where((o) => o.isReady).toList());
+  return mergeLists<PalletOrder>([open, ready, shipped, finished], (o) => o.id).map((l) {
     l.sort((a, b) => (b.createdAt ?? DateTime(2000)).compareTo(a.createdAt ?? DateTime(2000)));
     return l;
   });
@@ -1248,11 +1250,8 @@ Future<void> exportShipments() async {
       toast('Excel oluşturulamadı.');
       return;
     }
-    final dir = await getTemporaryDirectory();
     final now = DateTime.now();
-    final file = File('${dir.path}/sevkiyat_${now.year}${two(now.month)}${two(now.day)}.xlsx');
-    await file.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(file.path)], text: 'Sevkiyat listesi');
+    await shareBytes(bytes, 'sevkiyat_${now.year}${two(now.month)}${two(now.day)}.xlsx', 'Sevkiyat listesi');
   } catch (e) {
     toast('Excel hatası: $e');
   }
@@ -1330,11 +1329,8 @@ Future<void> exportPackingList(PalletOrder o) async {
       toast('Excel oluşturulamadı.');
       return;
     }
-    final dir = await getTemporaryDirectory();
     final safe = o.orderNo.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
-    final file = File('${dir.path}/ceki_listesi_$safe.xlsx');
-    await file.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(file.path)], text: 'Çeki listesi · Sipariş ${o.orderNo}');
+    await shareBytes(bytes, 'ceki_listesi_$safe.xlsx', 'Çeki listesi · Sipariş ${o.orderNo}');
   } catch (e) {
     toast('Excel hatası: $e');
   }
