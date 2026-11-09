@@ -20,6 +20,8 @@ import 'package:share_plus/share_plus.dart';
 part 'pack.dart';
 part 'pallet.dart';
 part 'machine.dart';
+part 'mfault.dart';
+part 'account.dart';
 
 // ---------------------------------------------------------------------------
 // Ayarlar
@@ -82,7 +84,20 @@ const Map<String, String> kModules = {
   'paletleme': 'Paletleme',
   'hat': 'Sargı makineleri',
   'uretim': 'Üretim makineleri',
+  'teknik': 'Teknik hizmet',
   'rapor': 'Raporlar / Excel',
+};
+
+// Teknik hizmet (makine arızaları) varsayılan yetkileri
+const Map<String, String> kTechDefault = {
+  'admin': 'yonet',
+  'sef': 'yonet',
+  'teknisyen': 'gir',
+  'vardiya': 'gor',
+  'kalite': 'gor',
+  'ihracat': 'gor',
+  'planlama': 'gor',
+  'izleyen': 'gor',
 };
 
 // ---------------------------------------------------------------------------
@@ -219,7 +234,8 @@ Map<String, dynamic> roleFlags(String role) {
 Map<String, String> defaultPerms(String role) {
   final custom = gCustomRoles[role];
   if (custom != null) return Map<String, String>.from(custom.perms);
-  Map<String, String> p(String a, String pk, String pl, String h, String r) => {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'uretim': h, 'rapor': r};
+  Map<String, String> p(String a, String pk, String pl, String h, String r) =>
+      {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'uretim': h, 'teknik': kTechDefault[role] ?? 'yok', 'rapor': r};
   switch (role) {
     case 'admin':
       return p('yonet', 'yonet', 'yonet', 'yonet', 'yonet');
@@ -614,6 +630,19 @@ class Notifier {
     await notif.show(id.hashCode & 0x3fffffff, title, body, NotificationDetails(android: details), payload: 'mach:$group|$id');
   }
 
+  // Makine arızası bilgisi (atama, onay isteği)
+  static Future<void> faultInfo(String id, String title, String body) async {
+    const details = AndroidNotificationDetails(
+      'makine_ariza_v1',
+      'Makine arızaları',
+      channelDescription: 'Size atanan arızalar ve onayınızı bekleyen arızalar',
+      importance: Importance.max,
+      priority: Priority.max,
+      enableVibration: true,
+    );
+    await notif.show(id.hashCode & 0x3fffffff, title, body, const NotificationDetails(android: details), payload: 'mfault:$id');
+  }
+
   static Future<void> cancel(String faultId) async {
     try {
       await notif.cancel(idFor(faultId));
@@ -626,6 +655,11 @@ void openFault(String id) => openPayload(id);
 void openPayload(String payload) {
   if (currentUser == null) {
     pendingFaultId = payload;
+    return;
+  }
+  if (payload.startsWith('mfault:')) {
+    final id = payload.substring(7);
+    navKey.currentState?.push(MaterialPageRoute(builder: (_) => MFaultDetailPage(faultId: id)));
     return;
   }
   if (payload.startsWith('mach:')) {
@@ -652,6 +686,9 @@ List<Widget> commonActions(AppUser me) {
         icon: const Icon(Icons.battery_alert),
         onPressed: () => keepAlive.invokeMethod('batterySettings').catchError((_) => null),
       ),
+    Builder(
+      builder: (c) => IconButton(onPressed: () => changeOwnPasswordDialog(c), icon: const Icon(Icons.key), tooltip: 'Şifremi değiştir'),
+    ),
     IconButton(onPressed: signOut, icon: const Icon(Icons.logout), tooltip: 'Çıkış'),
   ];
 }
@@ -669,11 +706,13 @@ class Watchers {
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _assignSub;
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _packSub;
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _machSub;
+  static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _fAssignSub;
+  static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _fApproveSub;
   static String _key = '';
   static final Set<String> _seen = <String>{};
 
   static Future<void> ensure(AppUser u) async {
-    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}';
+    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}|${u.perm('teknik')}';
     if (key == _key) return;
     await stop();
     _key = key;
@@ -737,16 +776,19 @@ class Watchers {
       }, onError: (_) {});
     }
 
-    if (u.machineAlarm) {
+    // Makine alarmı açık olanlar tüm duruş alarmlarını; teknik hizmet müdürü arıza alarmlarını alır
+    final techBoss = !u.isAdmin && u.can('teknik', 'yonet');
+    if (u.machineAlarm || techBoss) {
       final since = Timestamp.fromDate(DateTime.now().subtract(const Duration(seconds: 10)));
       _machSub = db.collection('machineAlerts').where('createdAt', isGreaterThan: since).snapshots().listen((s) {
         for (final c in s.docChanges) {
           if (c.type != DocumentChangeType.added) continue;
           final m = c.doc.data() ?? <String, dynamic>{};
+          if (!u.machineAlarm && m['fault'] != true) continue;
           if (!_seen.add('mach:${c.doc.id}')) continue;
           Notifier.machineAlert(
             c.doc.id,
-            'MAKİNE DURDU: ${m['machineName'] ?? ''}',
+            '${m['fault'] == true ? 'MAKİNE ARIZASI' : 'MAKİNE DURDU'}: ${m['machineName'] ?? ''}',
             '${m['label'] ?? ''}${(m['note'] ?? '').toString().isEmpty ? '' : ' · ${m['note']}'}${(m['line'] ?? '').toString().isEmpty ? '' : ' · ${m['line']}'} · ${m['by'] ?? ''}',
             mGroupOf((m['group'] ?? '').toString()).key,
           );
@@ -754,9 +796,40 @@ class Watchers {
       }, onError: (_) {});
     }
 
+    // Teknisyene arıza atanınca
+    if (u.can('teknik', 'gir') || u.isAdmin) {
+      var first = true;
+      _fAssignSub = MFaultOps.col.where('assigneeOpen', isEqualTo: u.uid).snapshots().listen((s) {
+        if (!first) {
+          for (final c in s.docChanges) {
+            if (c.type != DocumentChangeType.added) continue;
+            final f = MFault.fromDoc(c.doc);
+            if (f.assignedBy == u.name) continue; // kendisi üstlendiyse bildirim gerekmez
+            Notifier.faultInfo(f.id, 'Size arıza atandı: ${f.machineName}', '${f.desc} · ${f.reportedBy}');
+          }
+        }
+        first = false;
+      }, onError: (_) {});
+    }
+    // Arızayı açana: teknisyen bitirdi, onay bekleniyor
+    {
+      var first = true;
+      _fApproveSub = MFaultOps.col.where('awaitApproval', isEqualTo: u.uid).snapshots().listen((s) {
+        if (!first) {
+          for (final c in s.docChanges) {
+            if (c.type != DocumentChangeType.added) continue;
+            final f = MFault.fromDoc(c.doc);
+            Notifier.faultInfo(f.id, 'Arıza giderildi, onayınız bekleniyor: ${f.machineName}', '${f.doneNote} · ${f.assigneeName}');
+          }
+        }
+        first = false;
+      }, onError: (_) {});
+    }
+
     if (kIsWeb) return; // web sürümünde arka plan servisi yok
     try {
-      if (!u.machineAlarm && !u.getsPackAlerts && !(kArizaPanel && u.getsAlarm)) {
+      final machineUser = u.can('hat', 'gir') || u.can('uretim', 'gir') || u.can('teknik', 'gir');
+      if (!u.machineAlarm && !u.getsPackAlerts && !machineUser && !(kArizaPanel && u.getsAlarm)) {
         await keepAlive.invokeMethod('stop');
       } else {
         await keepAlive.invokeMethod('start');
@@ -769,6 +842,10 @@ class Watchers {
     await _assignSub?.cancel();
     await _packSub?.cancel();
     await _machSub?.cancel();
+    await _fAssignSub?.cancel();
+    await _fApproveSub?.cancel();
+    _fAssignSub = null;
+    _fApproveSub = null;
     _packSub = null;
     _machSub = null;
     _alarmSub = null;
@@ -1280,6 +1357,14 @@ class _HomePageState extends State<HomePage> {
         modules.add('uretim');
       }
     }
+    // Teknik hizmet sekmesi (admin makine panellerindeki "Arızalar"dan ulaşır)
+    if (!me.isAdmin && me.can('teknik', 'gor')) {
+      if (me.role == 'teknisyen' || me.role == 'sef' || me.can('teknik', 'gir')) {
+        modules.insert(0, 'teknik');
+      } else {
+        modules.add('teknik');
+      }
+    }
     if (me.role == 'depo' && me.can('paletleme', 'gor')) {
       modules.insert(0, 'paletleme');
     } else if (me.can('paletleme', 'gor')) {
@@ -1306,6 +1391,7 @@ class _HomePageState extends State<HomePage> {
                     'paketleme': Icons.inventory_2_outlined,
                     'hat': Icons.precision_manufacturing_outlined,
                     'uretim': Icons.factory_outlined,
+                    'teknik': Icons.build_circle_outlined,
                     'paletleme': Icons.layers_outlined,
                     'yonetim': Icons.manage_accounts_outlined,
                   }[m] ??
@@ -1315,6 +1401,7 @@ class _HomePageState extends State<HomePage> {
                     'paketleme': 'Paketleme',
                     'hat': 'Sargı',
                     'uretim': 'Üretim',
+                    'teknik': 'Arızalar',
                     'paletleme': 'Paletleme',
                     'yonetim': 'Yönetim',
                   }[m] ??
@@ -1329,6 +1416,7 @@ class _HomePageState extends State<HomePage> {
     if (current == 'hat') return MachineHome(key: const ValueKey('mh-sargi'), me: me, nav: nav, group: kSargi);
     if (current == 'uretim') return MachineHome(key: const ValueKey('mh-uretim'), me: me, nav: nav, group: kUretim);
     if (current == 'yonetim') return _adminScaffold(context, me, nav);
+    if (current == 'teknik') return TechHome(me: me, nav: nav);
     return _arizaScaffold(context, me, nav);
   }
 
@@ -2427,6 +2515,12 @@ class UsersView extends StatelessWidget {
                 label: const Text('Roller'),
               ),
             ]),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PasswordLogsPage())),
+              icon: const Icon(Icons.history),
+              label: const Text('Şifre değişiklik kayıtları'),
+            ),
             const SizedBox(height: 10),
             const Text(
               'Kullanıcıyı buradan ekleyebilir ya da kişi telefondan "Yeni hesap oluştur" ile kayıt olabilir. '
@@ -2517,6 +2611,14 @@ class UsersView extends StatelessWidget {
                           ),
                       ],
                     ),
+                    if (currentUser?.isAdmin == true && u.uid != currentUser?.uid) ...[
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: () => adminResetPasswordDialog(context, u),
+                        icon: const Icon(Icons.lock_reset, size: 18),
+                        label: const Text('Şifre sıfırla'),
+                      ),
+                    ],
                     if (u.role != 'admin' && u.role != 'bekliyor' && (u.can('hat', 'gor') || u.can('uretim', 'gor'))) ...[
                       const SizedBox(height: 8),
                       OutlinedButton.icon(
