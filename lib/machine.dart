@@ -31,6 +31,20 @@ const MGroup kUretim = MGroup('uretim', 'Üretim makineleri', 'Bölge', 'uretim'
 const List<MGroup> kMGroups = [kSargi, kUretim];
 MGroup mGroupOf(String key) => key == 'uretim' ? kUretim : kSargi;
 
+// Makine → panel eşlemesi. Eski uygulama sürümleri durum / üretim / sipariş kayıtlarına panel bilgisi
+// yazmadığı için kaydın paneli önce makinesinden bulunur; makine bilinmiyorsa kayıttaki alana bakılır.
+final Map<String, String> gMachineGroup = {};
+void rememberMachineGroups(Iterable<LineMachine> ms) {
+  for (final m in ms) {
+    gMachineGroup[m.id] = m.group;
+  }
+}
+
+bool recOwns(MGroup g, String machineId, String recGroup) {
+  final mg = gMachineGroup[machineId];
+  return g.owns(mg ?? recGroup);
+}
+
 // Fire metni: paket fire ve ürün fire (adet / kg)
 String fireText(double pA, double pK, double uA, double uK) {
   String q(double a, double k) => [if (a > 0) '${fmtQty(a)} adet', if (k > 0) '${fmtQty(k)} kg'].join(' + ');
@@ -468,6 +482,7 @@ class MJob {
   final int runSec;
   final Map<String, int> stops;
   final int dayCount;
+  final int photoCount;
   final String group;
   final double fpAdet;
   final double fpKg;
@@ -495,6 +510,7 @@ class MJob {
     required this.runSec,
     required this.stops,
     required this.dayCount,
+    this.photoCount = 0,
     this.group = '',
     this.fpAdet = 0,
     this.fpKg = 0,
@@ -528,6 +544,7 @@ class MJob {
       runSec: _int(m['runSec']),
       stops: st,
       dayCount: _int(m['dayCount']),
+      photoCount: _int(m['photoCount']),
       group: (m['group'] ?? '').toString(),
       fpAdet: _dbl(m['fpAdet']),
       fpKg: _dbl(m['fpKg']),
@@ -550,13 +567,18 @@ class MJob {
   }
 }
 
-// Bir işin çalışma / duruş özetini durum kayıtlarından hesaplar
-Map<String, dynamic> jobSummaryFromLogs(List<MLog> logs, DateTime now) {
+// Bir işin çalışma / duruş özetini durum kayıtlarından hesaplar.
+// Her kayıt en geç bir sonraki kaydın başladığı anda biter (çakışan / açık kalmış kayıt iki kez sayılmaz).
+Map<String, dynamic> jobSummaryFromLogs(List<MLog> logs0, DateTime now) {
   int run = 0;
   final stops = <String, int>{};
-  for (final l in logs) {
-    if (l.state == kOffKey || l.start == null) continue;
-    final e = l.end ?? now;
+  final logs = logs0.where((l) => l.start != null).toList()..sort((a, b) => a.start!.compareTo(b.start!));
+  for (var i = 0; i < logs.length; i++) {
+    final l = logs[i];
+    if (l.state == kOffKey) continue;
+    var e = l.end ?? now;
+    if (e.isAfter(now)) e = now;
+    if (i + 1 < logs.length && logs[i + 1].start!.isBefore(e)) e = logs[i + 1].start!;
     final sec = e.difference(l.start!).inSeconds;
     if (sec <= 0) continue;
     if (l.state == kRunKey) {
@@ -574,6 +596,8 @@ class MStat {
   final String name;
   final String line;
   int run = 0;
+  int off = 0; // kapalı / vardiya dışı (verime girmez)
+  int span = 0; // seçilen vardiyaların toplam süresi
   final Map<String, int> stops = {};
   double qtyAdet = 0;
   double qtyKg = 0;
@@ -602,6 +626,7 @@ class MStat {
 
   int get stopTotal => stops.values.fold(0, (a, b) => a + b);
   int get tracked => run + stopTotal;
+  int get none => math.max(0, span - off - run - stopTotal); // hiç durum girilmemiş süre
   double get efficiency => tracked == 0 ? 0 : run * 100 / tracked;
   String get qtyText {
     final p = <String>[];
@@ -639,20 +664,124 @@ List<MLog> _withOpenLogs(List<LineMachine> machines, List<MLog> logs) {
   return all;
 }
 
+// Durum kaydının düzeltilmiş zaman aralığı
+class MSeg {
+  final MLog l;
+  final DateTime s;
+  final DateTime e;
+  const MSeg(this.l, this.s, this.e);
+
+  int secIn(List<TimeWin> wins) {
+    var t = 0;
+    for (final w in wins) {
+      final a = s.isAfter(w.s) ? s : w.s;
+      final b = e.isBefore(w.e) ? e : w.e;
+      final d = b.difference(a).inSeconds;
+      if (d > 0) t += d;
+    }
+    return t;
+  }
+}
+
+// Durum kayıtlarını makine başına zaman çizelgesine çevirir: her kayıt en geç aynı makinedeki
+// bir sonraki kaydın başladığı anda biter. Böylece hiçbir süre iki kez sayılmaz; raporlar birbirini tutar.
+List<MSeg> normLogs(List<LineMachine> machines, List<MLog> logs, DateTime now) {
+  final byId = <String, MLog>{};
+  for (final l in _withOpenLogs(machines, logs)) {
+    byId[l.id] = l;
+  }
+  final per = <String, List<MLog>>{};
+  for (final l in byId.values) {
+    if (l.start == null || l.start!.isAfter(now)) continue;
+    per.putIfAbsent(l.machineId, () => <MLog>[]).add(l);
+  }
+  final out = <MSeg>[];
+  for (final arr in per.values) {
+    arr.sort((a, b) => a.start!.compareTo(b.start!));
+    for (var i = 0; i < arr.length; i++) {
+      final l = arr[i];
+      var e = l.end ?? now;
+      if (e.isAfter(now)) e = now;
+      if (i + 1 < arr.length && arr[i + 1].start!.isBefore(e)) e = arr[i + 1].start!;
+      if (e.isBefore(l.start!)) e = l.start!;
+      out.add(MSeg(l, l.start!, e));
+    }
+  }
+  return out;
+}
+
+// from verilirse makinenin ilk kaydından önceki süre sayılmaz (makine sisteme sonradan eklenmiş olabilir)
+int winSpanSec(List<TimeWin> wins, DateTime now, [DateTime? from]) {
+  var t = 0;
+  for (final w in wins) {
+    final e = w.e.isBefore(now) ? w.e : now;
+    final s = (from != null && from.isAfter(w.s)) ? from : w.s;
+    final d = e.difference(s).inSeconds;
+    if (d > 0) t += d;
+  }
+  return t;
+}
+
+// Dakikaya yuvarlarken parçaların toplamı hedefi tutsun (en büyük kalan yöntemi)
+List<int> lrRound(List<double> vals, int target) {
+  final fl = vals.map((v) => v.floor()).toList();
+  var rem = target - fl.fold<int>(0, (a, b) => a + b);
+  final ord = List<int>.generate(vals.length, (i) => i)..sort((a, b) => (vals[b] - fl[b]).compareTo(vals[a] - fl[a]));
+  for (var k = 0; k < ord.length && rem > 0; k++, rem--) {
+    fl[ord[k]]++;
+  }
+  for (var k = ord.length - 1; k >= 0 && rem < 0; k--) {
+    if (fl[ord[k]] > 0) {
+      fl[ord[k]]--;
+      rem++;
+    }
+  }
+  return fl;
+}
+
+// Bir makinenin dakikaları: vardiya süresi = kapalı + kayıt yok + çalışma + duruş nedenleri (tam tutar)
+class MStatMin {
+  final int span, off, none, run, stop;
+  final Map<String, int> stops;
+  const MStatMin(this.span, this.off, this.none, this.run, this.stop, this.stops);
+  int get tracked => run + stop;
+}
+
+MStatMin statMin(MStat st) {
+  final labels = st.stops.keys.toList();
+  final parts = <double>[st.off / 60, st.none / 60, st.run / 60, for (final l in labels) st.stops[l]! / 60];
+  final r = lrRound(parts, (st.span / 60).round());
+  final stops = <String, int>{};
+  for (var i = 0; i < labels.length; i++) {
+    stops[labels[i]] = r[3 + i];
+  }
+  final stop = stops.values.fold<int>(0, (a, b) => a + b);
+  return MStatMin((st.span / 60).round(), r[0], r[1], r[2], stop, stops);
+}
+
 Map<String, MStat> computeMStats(List<LineMachine> machines, List<MLog> logs, List<MEntry> entries, List<TimeWin> wins) {
   final now = DateTime.now();
-  final out = <String, MStat>{};
-  for (final m in machines) {
-    out[m.id] = MStat(m.id, m.name, m.line);
+  final segs = normLogs(machines, logs, now);
+  // Vardiya süresi makinenin ilk durum kaydından itibaren sayılır (makine eklenmeden önceki günler "kayıt yok" olmasın)
+  final first = <String, DateTime>{};
+  for (final x in segs) {
+    final f = first[x.l.machineId];
+    if (f == null || x.s.isBefore(f)) first[x.l.machineId] = x.s;
   }
-  for (final l in _withOpenLogs(machines, logs)) {
-    if (l.state == kOffKey) continue; // kapalı / vardiya dışı raporlanmaz
-    var sec = 0;
-    for (final w in wins) {
-      sec += l.secondsIn(w.s, w.e, now);
-    }
+  final out = <String, MStat>{};
+  MStat mk(String id, String name, String line) => MStat(id, name, line)..span = first[id] == null ? 0 : winSpanSec(wins, now, first[id]);
+  for (final m in machines) {
+    out[m.id] = mk(m.id, m.name, m.line);
+  }
+  for (final x in segs) {
+    final l = x.l;
+    final sec = x.secIn(wins);
     if (sec <= 0) continue;
-    final st = out.putIfAbsent(l.machineId, () => MStat(l.machineId, l.machineName, l.line));
+    final st = out.putIfAbsent(l.machineId, () => mk(l.machineId, l.machineName, l.line));
+    if (l.state == kOffKey) {
+      st.off += sec; // kapalı / vardiya dışı: verime girmez
+      continue;
+    }
     if (l.state == kRunKey) {
       st.run += sec;
     } else {
@@ -664,7 +793,7 @@ Map<String, MStat> computeMStats(List<LineMachine> machines, List<MLog> logs, Li
   for (final e in entries) {
     final t = e.t;
     if (t == null || !e.isProd || !wins.any((w) => w.contains(t))) continue;
-    final st = out.putIfAbsent(e.machineId, () => MStat(e.machineId, e.machineName, e.line));
+    final st = out.putIfAbsent(e.machineId, () => mk(e.machineId, e.machineName, e.line));
     if (e.unit == 'kg') {
       st.qtyKg += e.qty;
     } else {
@@ -672,6 +801,10 @@ Map<String, MStat> computeMStats(List<LineMachine> machines, List<MLog> logs, Li
     }
     st.addFire(e);
     if (e.productCode.isNotEmpty) st.products.add(e.productCode);
+  }
+  for (final st in out.values) {
+    final used = st.off + st.run + st.stopTotal;
+    if (st.span < used) st.span = used;
   }
   return out;
 }
@@ -734,31 +867,33 @@ class MachineOps {
   }
 
   static Stream<List<LineMachine>> machinesStream(MGroup g, {bool all = false}) => col.snapshots().map((s) {
-        final l = s.docs.map((d) => LineMachine.fromDoc(d)).where((m) => g.owns(m.group));
+        final allM = s.docs.map((d) => LineMachine.fromDoc(d)).toList();
+        rememberMachineGroups(allM);
+        final l = allM.where((m) => g.owns(m.group));
         return _sorted(all ? l : filterVisible<LineMachine>(currentUser, g, l, (m) => m.line));
       });
 
   static Stream<List<MLog>> logsSince(MGroup g, DateTime from) => logs
       .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(from))
       .snapshots()
-      .map((s) => s.docs.map((d) => MLog.fromDoc(d)).where((l) => g.owns(l.group)).toList());
+      .map((s) => s.docs.map((d) => MLog.fromDoc(d)).where((l) => recOwns(g, l.machineId, l.group)).toList());
 
   static Stream<List<MEntry>> entriesSince(MGroup g, DateTime from) => entries
       .where('t', isGreaterThanOrEqualTo: Timestamp.fromDate(from))
       .snapshots()
-      .map((s) => s.docs.map((d) => MEntry.fromDoc(d)).where((e) => g.owns(e.group)).toList());
+      .map((s) => s.docs.map((d) => MEntry.fromDoc(d)).where((e) => recOwns(g, e.machineId, e.group)).toList());
 
   static Future<List<MLog>> logsBetween(MGroup g, DateTime from, DateTime to) async {
     final s = await logs
         .where('start', isGreaterThanOrEqualTo: Timestamp.fromDate(from.subtract(const Duration(days: 7))))
         .where('start', isLessThan: Timestamp.fromDate(to))
         .get();
-    return s.docs.map((d) => MLog.fromDoc(d)).where((l) => g.owns(l.group)).toList();
+    return s.docs.map((d) => MLog.fromDoc(d)).where((l) => recOwns(g, l.machineId, l.group)).toList();
   }
 
   static Future<List<MEntry>> entriesBetween(MGroup g, DateTime from, DateTime to) async {
     final s = await entries.where('t', isGreaterThanOrEqualTo: Timestamp.fromDate(from)).where('t', isLessThan: Timestamp.fromDate(to)).get();
-    return s.docs.map((d) => MEntry.fromDoc(d)).where((e) => g.owns(e.group)).toList();
+    return s.docs.map((d) => MEntry.fromDoc(d)).where((e) => recOwns(g, e.machineId, e.group)).toList();
   }
 
   static Future<void> addMachine(MGroup g, String name, String line, int order) => col.add({
@@ -945,6 +1080,8 @@ class MachineOps {
   }
 
   static Future<Map<String, dynamic>> liveSummary(String jobId) => _summary(jobId, DateTime.now());
+  // Arşiv: durum kayıtlarından her seferinde yeniden hesaplanır (biten sipariş bitiş anına kadar)
+  static Future<Map<String, dynamic>> summaryAt(String jobId, DateTime at) => _summary(jobId, at);
 
   // Günü bitir: makine kapalıya alınır, sipariş açık kalır
   static Future<void> endDay(LineMachine m) async {
@@ -1059,7 +1196,7 @@ class MachineOps {
 
   // Devam eden işler canlı; bitenler seçili geçmiş aralığından
   static Stream<List<MJob>> jobsStream(MGroup g) {
-    List<MJob> conv(QuerySnapshot<Map<String, dynamic>> s) => s.docs.map((d) => MJob.fromDoc(d)).where((j) => g.owns(j.group)).toList();
+    List<MJob> conv(QuerySnapshot<Map<String, dynamic>> s) => s.docs.map((d) => MJob.fromDoc(d)).where((j) => recOwns(g, j.machineId, j.group)).toList();
     final active = jobs.where('status', whereIn: ['acik', 'gun_bitti']).snapshots().map(conv);
     final done = jobs.where('finishedAt', isGreaterThanOrEqualTo: histFrom()).snapshots().map((s) => conv(s).where((j) => j.finished).toList());
     return mergeLists<MJob>([active, done], (j) => j.id).map((l) {
@@ -1432,7 +1569,16 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
                 Expanded(child: _actBtn(c, 'bitir', 'Siparişi bitir', Icons.flag, const Color(0xFFC92A2A))),
               ]),
             if (m.hasJob)
-              TextButton.icon(onPressed: () => Navigator.pop(c, 'duzenle'), icon: const Icon(Icons.edit, size: 18), label: const Text('Sipariş no / ürün kodu düzelt')),
+              Row(children: [
+                Expanded(
+                  child: TextButton.icon(
+                      onPressed: () => Navigator.pop(c, 'duzenle'), icon: const Icon(Icons.edit, size: 18), label: const Text('Sipariş no / ürün kodu düzelt')),
+                ),
+                Expanded(
+                  child: TextButton.icon(
+                      onPressed: () => Navigator.pop(c, 'gorsel'), icon: const Icon(Icons.photo_library_outlined, size: 18), label: const Text('Sipariş görselleri')),
+                ),
+              ]),
             const SizedBox(height: 10),
             const Text('Durum', style: TextStyle(fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
@@ -1493,6 +1639,12 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
       }
     case 'duzenle':
       return askEditJob(context, m);
+    case 'gorsel':
+      {
+        await Navigator.of(context)
+            .push(MaterialPageRoute(builder: (_) => JobPhotosPage(jobId: m.jobId, orderNo: m.orderNo, group: m.grp)));
+        return;
+      }
     case 'f_detay':
       {
         await Navigator.of(context).push(MaterialPageRoute(builder: (_) => MFaultDetailPage(faultId: m.faultId)));
@@ -1821,8 +1973,9 @@ class _MachineReportPageState extends State<MachineReportPage> {
     setState(() => _loading = true);
     try {
       final ms = await MachineOps.col.get();
-      _machines = MachineOps._sorted(
-          filterVisible<LineMachine>(currentUser, g, ms.docs.map((d) => LineMachine.fromDoc(d)).where((m) => g.owns(m.group)), (m) => m.line));
+      final allM = ms.docs.map((d) => LineMachine.fromDoc(d)).toList();
+      rememberMachineGroups(allM);
+      _machines = MachineOps._sorted(filterVisible<LineMachine>(currentUser, g, allM.where((m) => g.owns(m.group)), (m) => m.line));
       final w = _wins;
       if (w.isEmpty) {
         _logs = [];
@@ -1962,7 +2115,8 @@ class _MachineReportPageState extends State<MachineReportPage> {
         ],
         const SizedBox(height: 6),
         Text(
-          'Her gün için ${_shift.times} aralığı raporlanır (${wins.length} vardiya). Verimlilik = çalışma ÷ (çalışma + duruş). Kapalı / vardiya dışı süreler raporlanmaz.',
+          'Her gün için ${_shift.times} aralığı raporlanır (${wins.length} vardiya). Toplam duruş = duruş nedenlerinin toplamı. '
+          'Verimlilik = çalışma ÷ (çalışma + toplam duruş); kapalı süre verime girmez. Her durum kaydı bir sonraki kaydın başladığı anda biter, hiçbir süre iki kez sayılmaz.',
           style: const TextStyle(color: kMuted, fontSize: 12),
         ),
         const SizedBox(height: 12),
@@ -1994,7 +2148,10 @@ class _MachineReportPageState extends State<MachineReportPage> {
                   ),
                 ),
                 const SizedBox(height: 6),
-                Text('Çalışma ${fmtSec(s.run)} · Duruş ${fmtSec(s.stopTotal)} · Üretim ${s.qtyText}', style: const TextStyle(color: kMuted, fontSize: 13)),
+                Text('Çalışma ${fmtMin(statMin(s).run)} · Toplam duruş ${fmtMin(statMin(s).stop)} · Üretim ${s.qtyText}',
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                Text('Vardiya süresi ${fmtMin(statMin(s).span)} = kapalı ${fmtMin(statMin(s).off)} + kayıt yok ${fmtMin(statMin(s).none)} + çalışma + duruş',
+                    style: const TextStyle(color: kMuted, fontSize: 12)),
                 if (s.hasFire) Text('Fire: ${s.fireTxt}', style: const TextStyle(color: Color(0xFFC92A2A), fontSize: 13, fontWeight: FontWeight.w600)),
                 if (s.products.isNotEmpty) Text('Ürünler: ${s.products.join(', ')}', style: const TextStyle(color: kMuted, fontSize: 13)),
                 for (final e in (s.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))))
@@ -2002,7 +2159,7 @@ class _MachineReportPageState extends State<MachineReportPage> {
                     padding: const EdgeInsets.only(top: 3),
                     child: Row(children: [
                       Expanded(child: Text(e.key)),
-                      Text(fmtSec(e.value), style: const TextStyle(fontWeight: FontWeight.w600)),
+                      Text(fmtMin(statMin(s).stops[e.key] ?? 0), style: const TextStyle(fontWeight: FontWeight.w600)),
                       SizedBox(
                         width: 56,
                         child: Text(' %${s.tracked == 0 ? 0 : (e.value * 100 / s.tracked).toStringAsFixed(0)}',
@@ -2018,6 +2175,17 @@ class _MachineReportPageState extends State<MachineReportPage> {
 }
 
 String fmtDay(DateTime d) => '${two(d.day)}.${two(d.month)}.${d.year}';
+
+// Sipariş bazlı satır (makine + sipariş; sipariş boşsa "siparişsiz")
+class _JobAgg {
+  final String machineId;
+  final String jobId;
+  final String orderNo;
+  final String productCode;
+  final MStat st;
+  int ppl = 0;
+  _JobAgg(this.machineId, this.jobId, this.orderNo, this.productCode) : st = MStat(jobId, '', '');
+}
 
 Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog> logs, List<MEntry> entries, List<TimeWin> wins, MShift shift,
     {List<MFault> faults = const []}) async {
@@ -2049,35 +2217,53 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     final fireHead = [t('Paket fire (adet)'), t('Paket fire (kg)'), t('Ürün fire (adet)'), t('Ürün fire (kg)')];
     List<xl.CellValue?> fireCells(MStat s) => [dbl(s.fpAdet), dbl(s.fpKg), dbl(s.fuAdet), dbl(s.fuKg)];
 
+    final mm = <String, MStatMin>{for (final s in list) s.id: statMin(s)};
     sh.appendRow(<xl.CellValue?>[t('${g.title} raporu'), t('${fmtDay(wins.first.day)} – ${fmtDay(wins.last.day)}'), t('Vardiya: ${shift.label}')]);
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
-      t('Makine'), t(hl), t('İzlenen süre (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'),
+      t('Makine'), t(hl), t('Vardiya süresi (dk)'), t('Kapalı (dk)'), t('Kayıt yok (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'),
       for (final l in lab) t('$l (dk)'),
       t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead, t('Ürünler'),
     ]);
     for (final s in list) {
+      final m = mm[s.id]!;
       sh.appendRow(<xl.CellValue?>[
-        t(s.name), t(s.line), n(mins(s.tracked)), n(mins(s.run)), n(mins(s.stopTotal)), dbl(s.efficiency),
-        for (final l in lab) n(mins(s.stops[l] ?? 0)),
+        t(s.name), t(s.line), n(m.span), n(m.off), n(m.none), n(m.run), n(m.stop), dbl(s.efficiency),
+        for (final l in lab) n(m.stops[l] ?? 0),
         dbl(s.qtyAdet), dbl(s.qtyKg), ...fireCells(s), t(s.products.join(', ')),
       ]);
     }
     sh.appendRow(<xl.CellValue?>[]);
-    sh.appendRow(<xl.CellValue?>[t('Verimlilik = çalışma ÷ (çalışma + duruş). Kapalı / vardiya dışı süreler raporlanmaz.')]);
-
-    byShift.appendRow(<xl.CellValue?>[
-      t('Tarih'), t('Vardiya'), t('Makine'), t(hl), t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
-      t('En çok duruş nedeni'),
+    sh.appendRow(<xl.CellValue?>[
+      t('Vardiya süresi = Kapalı + Kayıt yok + Çalışma + Toplam duruş. Toplam duruş = duruş nedenlerinin toplamı. Verimlilik = Çalışma ÷ (Çalışma + Toplam duruş); kapalı süre verime girmez.')
     ]);
-    for (final w in wins) {
-      final st = computeMStats(machines, logs, entries, [w]);
-      for (final s in st.values.toList()..sort((a, b) => '${a.line}${a.name}'.compareTo('${b.line}${b.name}'))) {
-        if (!s.hasData) continue;
-        final top = s.stops.entries.isEmpty ? null : (s.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
+    sh.appendRow(<xl.CellValue?>[
+      t('Her durum kaydı en geç aynı makinedeki bir sonraki kaydın başladığı anda biter; hiçbir süre iki kez sayılmaz. Vardiya bazlı ve Sipariş bazlı sayfaların toplamı bu sayfayla aynıdır.')
+    ]);
+
+    // Vardiya bazlı: her makinenin vardiya satırları toplamı Özet ile aynı
+    byShift.appendRow(<xl.CellValue?>[
+      t('Tarih'), t('Vardiya'), t('Makine'), t(hl), t('Kapalı (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'),
+      ...fireHead, t('En çok duruş nedeni'),
+    ]);
+    final perWin = [for (final w in wins) computeMStats(machines, logs, entries, [w])];
+    for (final s in list) {
+      final m = mm[s.id]!;
+      final rows = <int>[];
+      for (var i = 0; i < wins.length; i++) {
+        final x = perWin[i][s.id];
+        if (x != null && (x.hasData || x.off > 0)) rows.add(i);
+      }
+      final runR = lrRound([for (final i in rows) perWin[i][s.id]!.run / 60], m.run);
+      final stopR = lrRound([for (final i in rows) perWin[i][s.id]!.stopTotal / 60], m.stop);
+      final offR = lrRound([for (final i in rows) perWin[i][s.id]!.off / 60], m.off);
+      for (var k = 0; k < rows.length; k++) {
+        final w = wins[rows[k]];
+        final x = perWin[rows[k]][s.id]!;
+        final top = x.stops.entries.isEmpty ? null : (x.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
         byShift.appendRow(<xl.CellValue?>[
           t(fmtDay(w.day)), t('${_hmText(w.s.hour * 60 + w.s.minute)}–${_hmText(w.e.hour * 60 + w.e.minute)}'), t(s.name), t(s.line),
-          n(mins(s.run)), n(mins(s.stopTotal)), dbl(s.efficiency), dbl(s.qtyAdet), dbl(s.qtyKg), ...fireCells(s),
+          n(offR[k]), n(runR[k]), n(stopR[k]), dbl(x.efficiency), dbl(x.qtyAdet), dbl(x.qtyKg), ...fireCells(x),
           t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
         ]);
       }
@@ -2102,71 +2288,67 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
       ]);
     }
 
+    // Durum hareketleri: vardiya içindeki düzeltilmiş süreleriyle (kapalı dahil)
     det.appendRow(<xl.CellValue?>[
-      t('Makine'), t(hl), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Süre (dk)'), t('Sipariş no'), t('Ürün kodu'), t('Çalışan'), t('Günlükçü'), if (g.operators) t('Operatör'),
-      t('Giren'), t('Not'),
+      t('Makine'), t(hl), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Vardiya içindeki süre (dk)'), t('Sipariş no'), t('Ürün kodu'), t('Çalışan'), t('Günlükçü'),
+      if (g.operators) t('Operatör'), t('Giren'), t('Not'),
     ]);
-    final ls = _withOpenLogs(machines, logs).where((l) => l.state != kOffKey).map((l) {
-      var sec = 0;
-      for (final w in wins) {
-        sec += l.secondsIn(w.s, w.e, now);
-      }
-      return MapEntry(l, sec);
-    }).where((x) => x.value > 0).toList()
+    final segs = normLogs(machines, logs, now).map((x) => MapEntry(x, x.secIn(wins))).where((x) => x.value > 0).toList()
       ..sort((a, b) {
-        final c = '${a.key.line}${a.key.machineName}'.compareTo('${b.key.line}${b.key.machineName}');
-        return c != 0 ? c : (a.key.start ?? DateTime(2000)).compareTo(b.key.start ?? DateTime(2000));
+        final c = '${a.key.l.line}${a.key.l.machineName}'.compareTo('${b.key.l.line}${b.key.l.machineName}');
+        return c != 0 ? c : a.key.s.compareTo(b.key.s);
       });
-    for (final x in ls) {
-      final l = x.key;
+    for (final x in segs) {
+      final l = x.key.l;
+      final open = l.end == null && !x.key.e.isBefore(now.subtract(const Duration(seconds: 1)));
       det.appendRow(<xl.CellValue?>[
-        t(l.machineName), t(l.line), t(l.label), t(fmtFull(l.start)), t(l.end == null ? 'devam ediyor' : fmtFull(l.end)), n(mins(x.value)),
+        t(l.machineName), t(l.line), t(l.label.isEmpty ? l.state : l.label), t(fmtFull(x.key.s)), t(open ? 'devam ediyor' : fmtFull(x.key.e)), dbl(x.value / 60),
         t(l.orderNo), t(l.productCode), n(l.workers), n(l.daily), if (g.operators) n(l.operators), t(l.by), t(l.note),
       ]);
     }
 
-    // Sipariş bazlı (seçilen aralıkta)
+    // Sipariş bazlı: siparişsiz süreler de ayrı satırda; her makinenin satır toplamı Özet ile aynı
     final xl.Sheet byJob = excel['Sipariş bazlı'];
     byJob.appendRow(<xl.CellValue?>[
-      t('Makine'), t(hl), t('Sipariş no'), t('Ürün kodu'), t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
+      t('Makine'), t(hl), t('Sipariş no'), t('Ürün kodu'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
       t('Kişi (son)'), t('En çok duruş nedeni'),
     ]);
-    final jobKeys = <String, List<Object>>{};
-    final jobFire = <String, MStat>{};
-    for (final x in ls) {
-      final l = x.key;
-      if (l.jobId.isEmpty) continue;
-      final k = jobKeys.putIfAbsent(l.jobId, () => <Object>[l, 0, <String, int>{}, 0.0, 0.0, l.workers + l.daily + l.operators]);
+    final jobs = <String, _JobAgg>{};
+    for (final x in segs) {
+      final l = x.key.l;
+      if (l.state == kOffKey) continue;
+      final k = jobs.putIfAbsent('${l.machineId}|${l.jobId}', () => _JobAgg(l.machineId, l.jobId, l.orderNo, l.productCode));
       if (l.state == kRunKey) {
-        k[1] = (k[1] as int) + x.value;
+        k.st.run += x.value;
       } else {
-        final mp = k[2] as Map<String, int>;
-        mp[l.label] = (mp[l.label] ?? 0) + x.value;
+        final lb = l.label.isEmpty ? l.state : l.label;
+        k.st.stops[lb] = (k.st.stops[lb] ?? 0) + x.value;
       }
-      k[5] = l.workers + l.daily + l.operators;
+      if (l.jobId.isNotEmpty) k.ppl = l.workers + l.daily + l.operators;
     }
     for (final e in es) {
-      if (!e.isProd || e.jobId.isEmpty) continue;
-      final k = jobKeys[e.jobId];
-      if (k == null) continue;
+      if (!e.isProd) continue;
+      final k = jobs.putIfAbsent('${e.machineId}|${e.jobId}', () => _JobAgg(e.machineId, e.jobId, e.orderNo, e.productCode));
       if (e.unit == 'kg') {
-        k[4] = (k[4] as double) + e.qty;
+        k.st.qtyKg += e.qty;
       } else {
-        k[3] = (k[3] as double) + e.qty;
+        k.st.qtyAdet += e.qty;
       }
-      jobFire.putIfAbsent(e.jobId, () => MStat(e.jobId, '', '')).addFire(e);
+      k.st.addFire(e);
     }
-    for (final k in jobKeys.values) {
-      final l = k[0] as MLog;
-      final run = k[1] as int;
-      final mp = k[2] as Map<String, int>;
-      final stop = mp.values.fold(0, (a, b) => a + b);
-      final top = mp.entries.isEmpty ? null : (mp.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
-      byJob.appendRow(<xl.CellValue?>[
-        t(l.machineName), t(l.line), t(l.orderNo), t(l.productCode), n(mins(run)), n(mins(stop)), dbl(run + stop == 0 ? 0 : run * 100 / (run + stop)),
-        dbl(k[3] as double), dbl(k[4] as double), ...fireCells(jobFire[l.jobId] ?? MStat('', '', '')),
-        n(k[5] as int), t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
-      ]);
+    for (final s in list) {
+      final m = mm[s.id]!;
+      final rows = jobs.values.where((k) => k.machineId == s.id).toList()..sort((a, b) => (a.jobId.isEmpty ? 1 : 0).compareTo(b.jobId.isEmpty ? 1 : 0));
+      final runR = lrRound([for (final k in rows) k.st.run / 60], m.run);
+      final stopR = lrRound([for (final k in rows) k.st.stopTotal / 60], m.stop);
+      for (var i = 0; i < rows.length; i++) {
+        final k = rows[i];
+        final top = k.st.stops.entries.isEmpty ? null : (k.st.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
+        byJob.appendRow(<xl.CellValue?>[
+          t(s.name), t(s.line), t(k.jobId.isEmpty ? '(siparişsiz)' : k.orderNo), t(k.jobId.isEmpty ? '' : k.productCode), n(runR[i]), n(stopR[i]), dbl(k.st.efficiency),
+          dbl(k.st.qtyAdet), dbl(k.st.qtyKg), ...fireCells(k.st), k.jobId.isEmpty ? null : n(k.ppl), t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
+        ]);
+      }
     }
 
     // Arızalar (seçilen aralıkta bildirilenler)
@@ -2565,7 +2747,7 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
       final r = await findInHistory('machineJobs', 'orderNo', _q);
       setState(() {
         _extra.removeWhere((x) => r.any((d) => d.id == x.id));
-        _extra.addAll(r.map((d) => MJob.fromDoc(d)).where((j) => g.owns(j.group)));
+        _extra.addAll(r.map((d) => MJob.fromDoc(d)).where((j) => recOwns(g, j.machineId, j.group)));
       });
       toast(r.isEmpty ? 'Tüm geçmişte bu numarayla sipariş yok.' : '${r.length} kayıt bulundu');
     } catch (e) {
@@ -2624,6 +2806,10 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
                   child: _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
                       Expanded(child: Text('Sipariş ${j.orderNo}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
+                      if (j.photoCount > 0) ...[
+                        const Icon(Icons.photo_camera_outlined, size: 16, color: kMuted),
+                        Text(' ${j.photoCount}  ', style: const TextStyle(color: kMuted, fontSize: 12)),
+                      ],
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                         decoration: BoxDecoration(
@@ -2657,7 +2843,7 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: FutureBuilder<Map<String, dynamic>>(
-          future: j.finished ? Future.value(<String, dynamic>{'runSec': j.runSec, 'stops': j.stops}) : MachineOps.liveSummary(j.id),
+          future: MachineOps.summaryAt(j.id, j.finished ? (j.finishedAt ?? DateTime.now()) : DateTime.now()),
           builder: (c, snap) {
             final run = (snap.data?['runSec'] as int?) ?? j.runSec;
             final stops = (snap.data?['stops'] as Map<String, int>?) ?? j.stops;
@@ -2671,6 +2857,12 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
                 Text('Başlangıç: ${fmtFull(j.startedAt)}'),
                 Text('Bitiş: ${j.finished ? fmtFull(j.finishedAt) : 'devam ediyor'} · ${j.dayCount} gün'),
                 Text('Başlatan: ${j.by} · son kişi sayısı ${mGroupOf(j.group).peopleShort(j.workers, j.daily, j.operators)}'),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  onPressed: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => JobPhotosPage(jobId: j.id, orderNo: j.orderNo, group: mGroupOf(j.group)))),
+                  icon: const Icon(Icons.photo_library_outlined, size: 18),
+                  label: Text('Sipariş görselleri (${j.photoCount})'),
+                ),
                 if (j.finishNote.isNotEmpty) Text('Bitiş notu: ${j.finishNote}', style: const TextStyle(fontStyle: FontStyle.italic)),
                 const Divider(height: 20),
                 Text('Üretim: ${j.qtyText}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
@@ -2730,7 +2922,7 @@ Future<void> exportJobsExcel(MGroup g, List<MJob> jobs) async {
     final labels = <String>{};
     final sums = <String, Map<String, dynamic>>{};
     for (final j in jobs) {
-      final Map<String, dynamic> sm = j.finished ? <String, dynamic>{'runSec': j.runSec, 'stops': j.stops} : await MachineOps.liveSummary(j.id);
+      final Map<String, dynamic> sm = await MachineOps.summaryAt(j.id, j.finished ? (j.finishedAt ?? DateTime.now()) : DateTime.now());
       sums[j.id] = sm;
       labels.addAll((sm['stops'] as Map<String, int>).keys);
     }
@@ -2760,5 +2952,126 @@ Future<void> exportJobsExcel(MGroup g, List<MJob> jobs) async {
     await shareBytes(bytes, '${g == kUretim ? 'uretim' : 'sargi'}_siparis_arsivi_${now.year}${two(now.month)}${two(now.day)}.xlsx', '${g.title} sipariş arşivi');
   } catch (e) {
     toast('Excel hatası: $e');
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// Sipariş görselleri (ürün görseli vb., sipariş başına en fazla kMaxPhotos)
+// ---------------------------------------------------------------------------
+
+class JobPhotosPage extends StatefulWidget {
+  final String jobId;
+  final String orderNo;
+  final MGroup group;
+  const JobPhotosPage({super.key, required this.jobId, required this.orderNo, required this.group});
+
+  @override
+  State<JobPhotosPage> createState() => _JobPhotosPageState();
+}
+
+class _JobPhotosPageState extends State<JobPhotosPage> {
+  bool _busy = false;
+
+  CollectionReference<Map<String, dynamic>> get _col => MachineOps.jobs.doc(widget.jobId).collection('photos');
+
+  Future<void> _add(int count) async {
+    if (count >= kMaxPhotos) {
+      toast('En fazla $kMaxPhotos görsel eklenebilir.');
+      return;
+    }
+    final b = await pickPhotoBytes(context);
+    if (b == null) return;
+    setState(() => _busy = true);
+    try {
+      final fields = await photoFields('machineJobs/${widget.jobId}', b);
+      await _col.add({'i': DateTime.now().millisecondsSinceEpoch, ...fields, 'by': currentUser?.name ?? '', 't': Timestamp.now()});
+      await MachineOps.jobs.doc(widget.jobId).update({'photoCount': FieldValue.increment(1)});
+      toast('Görsel eklendi');
+    } catch (e) {
+      toast('Görsel eklenemedi: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _delete(QueryDocumentSnapshot<Map<String, dynamic>> d) async {
+    if (!await confirm(context, 'Görsel silinsin mi?', 'Bu görsel siparişten kaldırılır.', 'Sil')) return;
+    try {
+      await d.reference.delete();
+      await deleteStoredPhoto(d.data()['path']);
+      await MachineOps.jobs.doc(widget.jobId).update({'photoCount': FieldValue.increment(-1)});
+    } catch (e) {
+      toast('Silinemedi: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canAdd = canMachineEnter(currentUser, widget.group);
+    final canDel = canMachineManage(currentUser, widget.group);
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _col.orderBy('t').snapshots(),
+      builder: (context, snap) {
+        final docs = snap.data?.docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+        return Scaffold(
+          appBar: AppBar(title: Text('Sipariş ${widget.orderNo} · görseller (${docs.length}/$kMaxPhotos)')),
+          floatingActionButton: canAdd && docs.length < kMaxPhotos
+              ? FloatingActionButton.extended(
+                  backgroundColor: kOrange,
+                  foregroundColor: Colors.white,
+                  onPressed: _busy ? null : () => _add(docs.length),
+                  icon: _busy
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.add_a_photo),
+                  label: const Text('Görsel ekle'),
+                )
+              : null,
+          body: snap.hasError
+              ? Center(child: Text('Hata: ${snap.error}'))
+              : !snap.hasData
+                  ? const Center(child: CircularProgressIndicator())
+                  : docs.isEmpty
+                      ? const Center(
+                          child: Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Text('Henüz görsel yok. Ürün görseli, etiket, numune gibi fotoğrafları "Görsel ekle" ile ekleyin.',
+                                textAlign: TextAlign.center, style: TextStyle(color: kMuted)),
+                          ),
+                        )
+                      : GridView.builder(
+                          padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+                          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(maxCrossAxisExtent: 160, mainAxisSpacing: 8, crossAxisSpacing: 8),
+                          itemCount: docs.length,
+                          itemBuilder: (context, i) {
+                            final m = docs[i].data();
+                            final url = (m['url'] ?? '').toString();
+                            final data = (m['data'] ?? '').toString();
+                            return GestureDetector(
+                              onTap: () => openStoredImage(context, url, data),
+                              onLongPress: canDel ? () => _delete(docs[i]) : null,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(10),
+                                child: Stack(fit: StackFit.expand, children: [
+                                  storedImage(url, data),
+                                  Positioned(
+                                    left: 0,
+                                    right: 0,
+                                    bottom: 0,
+                                    child: Container(
+                                      color: Colors.black45,
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      child: Text('${m['by'] ?? ''} · ${fmtDT(tsToDate(m['t']))}',
+                                          maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 11)),
+                                    ),
+                                  ),
+                                ]),
+                              ),
+                            );
+                          },
+                        ),
+        );
+      },
+    );
   }
 }
