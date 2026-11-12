@@ -597,7 +597,9 @@ class MStat {
   final String line;
   int run = 0;
   int off = 0; // kapalı / vardiya dışı (verime girmez)
-  int span = 0; // seçilen vardiyaların toplam süresi
+  int span = 0; // çalışılan vardiyaların toplam süresi
+  int shifts = 0; // çalışılan vardiya sayısı
+  int skipped = 0; // baştan sona kapalı (sayılmayan) vardiya sayısı
   final Map<String, int> stops = {};
   double qtyAdet = 0;
   double qtyKg = 0;
@@ -759,41 +761,69 @@ MStatMin statMin(MStat st) {
   return MStatMin((st.span / 60).round(), r[0], r[1], r[2], stop, stops);
 }
 
+// Makine istatistikleri. Vardiya vardiya hesaplanır: makinenin baştan sona kapalı olduğu (hiç çalışma / duruş olmayan)
+// vardiyalar çalışılmamış sayılır ve hiçbir sütuna girmez (hafta sonu, tatil, çalışılmayan gün).
 Map<String, MStat> computeMStats(List<LineMachine> machines, List<MLog> logs, List<MEntry> entries, List<TimeWin> wins) {
   final now = DateTime.now();
   final segs = normLogs(machines, logs, now);
-  // Vardiya süresi makinenin ilk durum kaydından itibaren sayılır (makine eklenmeden önceki günler "kayıt yok" olmasın)
+  // Makinenin ilk durum kaydından önceki süre sayılmaz (makine sisteme sonradan eklenmiş olabilir)
   final first = <String, DateTime>{};
   for (final x in segs) {
     final f = first[x.l.machineId];
     if (f == null || x.s.isBefore(f)) first[x.l.machineId] = x.s;
   }
   final out = <String, MStat>{};
-  MStat mk(String id, String name, String line) => MStat(id, name, line)..span = first[id] == null ? 0 : winSpanSec(wins, now, first[id]);
+  MStat get(String id, String name, String line) => out.putIfAbsent(id, () => MStat(id, name, line));
   for (final m in machines) {
-    out[m.id] = mk(m.id, m.name, m.line);
+    get(m.id, m.name, m.line);
   }
+  // vardiya başına makine kovaları
+  final bk = <String, List<MStat>>{};
   for (final x in segs) {
     final l = x.l;
-    final sec = x.secIn(wins);
-    if (sec <= 0) continue;
-    final st = out.putIfAbsent(l.machineId, () => mk(l.machineId, l.machineName, l.line));
-    if (l.state == kOffKey) {
-      st.off += sec; // kapalı / vardiya dışı: verime girmez
-      continue;
+    get(l.machineId, l.machineName, l.line);
+    for (var i = 0; i < wins.length; i++) {
+      final sec = x.secIn([wins[i]]);
+      if (sec <= 0) continue;
+      final b = bk.putIfAbsent(l.machineId, () => [for (final _ in wins) MStat('', '', '')])[i];
+      if (l.state == kOffKey) {
+        b.off += sec;
+      } else if (l.state == kRunKey) {
+        b.run += sec;
+      } else {
+        final k = l.label.isEmpty ? l.state : l.label;
+        b.stops[k] = (b.stops[k] ?? 0) + sec;
+      }
+      if (l.productCode.isNotEmpty && l.state != kOffKey) b.products.add(l.productCode);
     }
-    if (l.state == kRunKey) {
-      st.run += sec;
-    } else {
-      final k = l.label.isEmpty ? l.state : l.label;
-      st.stops[k] = (st.stops[k] ?? 0) + sec;
+  }
+  for (final st in out.values) {
+    final arr = bk[st.id];
+    final f = first[st.id];
+    if (f == null) continue;
+    for (var i = 0; i < wins.length; i++) {
+      final w = wins[i];
+      final from = f.isAfter(w.s) ? f : w.s;
+      final to = w.e.isBefore(now) ? w.e : now;
+      final wspan = to.difference(from).inSeconds;
+      if (wspan <= 0) continue;
+      final b = arr?[i];
+      if (b == null || b.run + b.stopTotal <= 0) {
+        st.skipped++; // bu vardiyada çalışılmamış
+        continue;
+      }
+      st.shifts++;
+      st.span += wspan;
+      st.run += b.run;
+      st.off += b.off;
+      b.stops.forEach((k, v) => st.stops[k] = (st.stops[k] ?? 0) + v);
+      st.products.addAll(b.products);
     }
-    if (l.productCode.isNotEmpty) st.products.add(l.productCode);
   }
   for (final e in entries) {
     final t = e.t;
     if (t == null || !e.isProd || !wins.any((w) => w.contains(t))) continue;
-    final st = out.putIfAbsent(e.machineId, () => mk(e.machineId, e.machineName, e.line));
+    final st = get(e.machineId, e.machineName, e.line);
     if (e.unit == 'kg') {
       st.qtyKg += e.qty;
     } else {
@@ -2148,9 +2178,12 @@ class _MachineReportPageState extends State<MachineReportPage> {
                   ),
                 ),
                 const SizedBox(height: 6),
-                Text('Çalışma ${fmtMin(statMin(s).run)} · Toplam duruş ${fmtMin(statMin(s).stop)} · Üretim ${s.qtyText}',
+                Text('Çalışılan süre ${fmtMin(statMin(s).tracked)} = çalışma ${fmtMin(statMin(s).run)} + toplam duruş ${fmtMin(statMin(s).stop)}',
                     style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                Text('Vardiya süresi ${fmtMin(statMin(s).span)} = kapalı ${fmtMin(statMin(s).off)} + kayıt yok ${fmtMin(statMin(s).none)} + çalışma + duruş',
+                Text('Üretim ${s.qtyText}', style: const TextStyle(fontSize: 13)),
+                Text(
+                    '${s.shifts} vardiya çalışıldı${s.skipped > 0 ? ' (${s.skipped} kapalı vardiya sayılmadı)' : ''} · vardiya süresi ${fmtMin(statMin(s).span)}'
+                    '${statMin(s).off > 0 ? ' · ara kapalı ${fmtMin(statMin(s).off)}' : ''}${statMin(s).none > 0 ? ' · kayıt yok ${fmtMin(statMin(s).none)}' : ''}',
                     style: const TextStyle(color: kMuted, fontSize: 12)),
                 if (s.hasFire) Text('Fire: ${s.fireTxt}', style: const TextStyle(color: Color(0xFFC92A2A), fontSize: 13, fontWeight: FontWeight.w600)),
                 if (s.products.isNotEmpty) Text('Ürünler: ${s.products.join(', ')}', style: const TextStyle(color: kMuted, fontSize: 13)),
@@ -2221,21 +2254,26 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     sh.appendRow(<xl.CellValue?>[t('${g.title} raporu'), t('${fmtDay(wins.first.day)} – ${fmtDay(wins.last.day)}'), t('Vardiya: ${shift.label}')]);
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
-      t('Makine'), t(hl), t('Vardiya süresi (dk)'), t('Kapalı (dk)'), t('Kayıt yok (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'),
+      t('Makine'), t(hl), t('Verimlilik %'), t('Çalışılan süre (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'),
       for (final l in lab) t('$l (dk)'),
       t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead, t('Ürünler'),
+      t('Çalışılan vardiya'), t('Kapalı vardiya (sayılmadı)'), t('Vardiya süresi (dk)'), t('Ara kapalı (dk)'), t('Kayıt yok (dk)'),
     ]);
     for (final s in list) {
       final m = mm[s.id]!;
       sh.appendRow(<xl.CellValue?>[
-        t(s.name), t(s.line), n(m.span), n(m.off), n(m.none), n(m.run), n(m.stop), dbl(s.efficiency),
+        t(s.name), t(s.line), dbl(s.efficiency), n(m.tracked), n(m.run), n(m.stop),
         for (final l in lab) n(m.stops[l] ?? 0),
         dbl(s.qtyAdet), dbl(s.qtyKg), ...fireCells(s), t(s.products.join(', ')),
+        n(s.shifts), n(s.skipped), n(m.span), n(m.off), n(m.none),
       ]);
     }
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
-      t('Vardiya süresi = Kapalı + Kayıt yok + Çalışma + Toplam duruş. Toplam duruş = duruş nedenlerinin toplamı. Verimlilik = Çalışma ÷ (Çalışma + Toplam duruş); kapalı süre verime girmez.')
+      t('Çalışılan süre = Çalışma + Toplam duruş. Toplam duruş = kapalı hariç tüm duruş nedenlerinin toplamı. Verimlilik = Çalışma ÷ Çalışılan süre.')
+    ]);
+    sh.appendRow(<xl.CellValue?>[
+      t('Makinenin baştan sona kapalı olduğu vardiyalar (hafta sonu, çalışılmayan gün) hiç sayılmaz. Çalışılan vardiyalarda: Vardiya süresi = Çalışılan süre + Ara kapalı + Kayıt yok.')
     ]);
     sh.appendRow(<xl.CellValue?>[
       t('Her durum kaydı en geç aynı makinedeki bir sonraki kaydın başladığı anda biter; hiçbir süre iki kez sayılmaz. Vardiya bazlı ve Sipariş bazlı sayfaların toplamı bu sayfayla aynıdır.')
@@ -2243,7 +2281,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
 
     // Vardiya bazlı: her makinenin vardiya satırları toplamı Özet ile aynı
     byShift.appendRow(<xl.CellValue?>[
-      t('Tarih'), t('Vardiya'), t('Makine'), t(hl), t('Kapalı (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'),
+      t('Tarih'), t('Vardiya'), t('Makine'), t(hl), t('Ara kapalı (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'),
       ...fireHead, t('En çok duruş nedeni'),
     ]);
     final perWin = [for (final w in wins) computeMStats(machines, logs, entries, [w])];
