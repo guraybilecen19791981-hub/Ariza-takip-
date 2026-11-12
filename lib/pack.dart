@@ -1984,10 +1984,14 @@ Future<void> exportPackExcel() async {
     xl.CellValue n(int v) => xl.IntCellValue(v);
 
     final reasonKeys = kStopReasons.keys.toList();
+    // Paketleme notları "Not ekle" ile hareketlere yazılır; Excel'de ayrıca toplanır
+    final xl.Sheet s3 = excel['Notlar'];
+    s3.appendRow(<xl.CellValue?>[t('Tarih saat'), t('Sipariş no'), t('Ürün kodu'), t('Not'), t('Yazan')]);
     s1.appendRow(<xl.CellValue?>[
       t('Sipariş no'), t('Ürün kodu'), t('İş türü'), t('Sorumlu'), t('Başlangıç'), t('Bitiş'), t('Durum'),
       t('Toplam koli'), t('Artan adet'), t('Koli içi adet'), t('Koli içi kg'), t('Toplam kg'), t('Gün sayısı'), t('Son güncelleme'), t('Bitiş notu'),
       for (final k in reasonKeys) t('${kStopReasons[k]} (dk)'),
+      t('Notlar'),
     ]);
     s2.appendRow(<xl.CellValue?>[
       t('Sipariş no'), t('Ürün kodu'), t('İş türü'), t('Tarih saat'), t('İşlem'), t('Eklenen koli'), t('Eklenen adet'), t('Eklenen kg'),
@@ -1996,13 +2000,18 @@ Future<void> exportPackExcel() async {
 
     for (final d in orders.docs) {
       final o = PackOrder.fromDoc(d);
+      final ev = await PackOps.ref(o.id).collection('events').orderBy('t2').get();
+      final noteEvs = ev.docs.map((e) => PackEvent.fromDoc(e)).where((e) => e.type == 'not').toList();
+      for (final e in noteEvs) {
+        s3.appendRow(<xl.CellValue?>[t(fmtFull(e.t)), t(o.orderNo), t(o.productCode), t(e.displayText.replaceFirst('Not: ', '')), t(e.by)]);
+      }
       s1.appendRow(<xl.CellValue?>[
         t(o.orderNo), t(o.productCode), t(o.workTypeLabel), t(o.ownerName), t(fmtFull(o.createdAt)), t(fmtFull(o.finishedAt)), t(o.statusLabel),
         n(o.totalBoxes), n(o.remUnits), n(o.perBox), xl.DoubleCellValue(o.perBoxKg), xl.DoubleCellValue((o.totalKg * 100).round() / 100), n(o.dayCount),
         t(fmtFull(o.lastUpdateAt)), t(o.finishNote),
         for (final k in reasonKeys) n(o.stopMin[k] ?? 0),
+        t(noteEvs.map((e) => '${fmtFull(e.t)} · ${e.by}: ${e.displayText.replaceFirst('Not: ', '')}').join(' | ')),
       ]);
-      final ev = await PackOps.ref(o.id).collection('events').orderBy('t2').get();
       int running = 0;
       for (final e in ev.docs) {
         final m = e.data();

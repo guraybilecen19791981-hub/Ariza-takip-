@@ -1041,6 +1041,10 @@ class PalletDetailPage extends StatelessWidget {
               const SizedBox(height: 10),
               PalletPhotos(order: o, edit: edit),
               const SizedBox(height: 10),
+              NotesButton(
+                  noteRef: NoteRef(
+                      module: 'paletleme', refType: 'pallet', refId: o.id, title: 'Sipariş ${o.orderNo}${o.customer.isEmpty ? '' : ' · ${o.customer}'}', orderNo: o.orderNo)),
+              const SizedBox(height: 10),
               StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: PalletOps.ref(o.id).collection('pallets').orderBy('no').snapshots(),
                 builder: (context, ps) {
@@ -1218,8 +1222,12 @@ Future<void> exportShipments() async {
     xl.CellValue dbl(double v) => xl.DoubleCellValue(v);
     sh.appendRow(<xl.CellValue?>[
       t('Durum'), t('Sipariş no'), t('Müşteri'), t('Ürünler'), t('Palet'), t('Koli'), t('Adet'), t('Brüt kg'), t('Net kg'),
-      t('Bitiş (sevke hazır)'), t('Sevk tarihi'), t('Not'),
+      t('Bitiş (sevke hazır)'), t('Sevk tarihi'), t('Not'), t('Notlar'),
     ]);
+    Map<String, List<MNote>> notes = {};
+    try {
+      notes = await NotesOps.byModule('paletleme');
+    } catch (_) {}
     det.appendRow(<xl.CellValue?>[
       t('Durum'), t('Sipariş no'), t('Müşteri'), t('Sevk tarihi'), t('Palet no'), t('Palet ebatı'), t('Ürün kodu'), t('Lot no'), t('SKT'),
       t('Koli'), t('Koli içi adet'), t('Toplam adet'), t('1 koli brüt kg'), t('1 koli net kg'), t('Brüt kg'), t('Net kg'),
@@ -1228,6 +1236,7 @@ Future<void> exportShipments() async {
       sh.appendRow(<xl.CellValue?>[
         t(o.stateLabel), t(o.orderNo), t(o.customer), t(o.lines.map((l) => l.productCode).join(', ')), n(o.palletCount), n(o.totalBoxes),
         n(o.totalUnits), dbl(o.gross), dbl(o.net), t(fmtFull(o.finishedAt)), t(o.isShipped ? fmtFull(o.shippedAt) : ''), t(o.finishNote),
+        t(NotesOps.joined(notes[o.id])),
       ]);
       final ps = await PalletOps.ref(o.id).collection('pallets').orderBy('no').get();
       for (final p in ps.docs.map((d) => Pallet.fromDoc(d))) {

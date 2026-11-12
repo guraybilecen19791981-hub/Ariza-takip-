@@ -1609,6 +1609,12 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
                       onPressed: () => Navigator.pop(c, 'gorsel'), icon: const Icon(Icons.photo_library_outlined, size: 18), label: const Text('Sipariş görselleri')),
                 ),
               ]),
+            const SizedBox(height: 6),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.pop(c, 'notlar'),
+              icon: const Icon(Icons.sticky_note_2_outlined, size: 18),
+              label: Text(m.hasJob ? 'Notlar · siparişe not ekle' : 'Notlar · makineye not ekle'),
+            ),
             const SizedBox(height: 10),
             const Text('Durum', style: TextStyle(fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
@@ -1669,6 +1675,11 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
       }
     case 'duzenle':
       return askEditJob(context, m);
+    case 'notlar':
+      {
+        await Navigator.of(context).push(MaterialPageRoute(builder: (_) => NotesPage(ref: NoteRef.machine(m))));
+        return;
+      }
     case 'gorsel':
       {
         await Navigator.of(context)
@@ -1976,6 +1987,7 @@ class _MachineReportPageState extends State<MachineReportPage> {
   List<MLog>? _logs;
   List<MEntry> _entries = [];
   List<MFault> _faults = [];
+  List<MNote> _notes = [];
   List<LineMachine> _machines = [];
   bool _loading = false;
 
@@ -2018,6 +2030,11 @@ class _MachineReportPageState extends State<MachineReportPage> {
           _faults = await MFaultOps.between(g, w.first.s, end);
         } catch (_) {
           _faults = [];
+        }
+        try {
+          _notes = await NotesOps.between(g.key, w.first.s, end);
+        } catch (_) {
+          _notes = [];
         }
       }
     } catch (e) {
@@ -2090,7 +2107,8 @@ class _MachineReportPageState extends State<MachineReportPage> {
               ? null
               : () {
                   final ids = _visibleMachines.map((m) => m.id).toSet();
-                  exportMachineExcel(g, _visibleMachines, _fLogs, _fEntries, wins, _shift, faults: _faults.where((x) => ids.contains(x.machineId)).toList());
+                  exportMachineExcel(g, _visibleMachines, _fLogs, _fEntries, wins, _shift,
+                      faults: _faults.where((x) => ids.contains(x.machineId)).toList(), notes: _notes.where((x) => ids.contains(x.machineId)).toList());
                 },
         ),
       ]),
@@ -2221,7 +2239,7 @@ class _JobAgg {
 }
 
 Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog> logs, List<MEntry> entries, List<TimeWin> wins, MShift shift,
-    {List<MFault> faults = const []}) async {
+    {List<MFault> faults = const [], List<MNote> notes = const []}) async {
   try {
     if (wins.isEmpty) {
       toast('Seçilen aralıkta vardiya yok.');
@@ -2394,6 +2412,13 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     fs.appendRow(<xl.CellValue?>[for (final h in kFaultExcelHead(hl)) t(h)]);
     for (final f in faults.toList()..sort((a, b) => (a.createdAt ?? DateTime(2000)).compareTo(b.createdAt ?? DateTime(2000)))) {
       fs.appendRow(faultExcelRow(f));
+    }
+
+    // Notlar (seçilen aralıkta yazılanlar)
+    final xl.Sheet ns = excel['Notlar'];
+    ns.appendRow(<xl.CellValue?>[t('Tarih saat'), t('Makine'), t(hl), t('Sipariş no'), t('Ürün kodu'), t('Not'), t('Yazan')]);
+    for (final x in notes) {
+      ns.appendRow(<xl.CellValue?>[t(fmtFull(x.t)), t(x.machineName), t(x.line), t(x.orderNo), t(x.productCode), t(x.text), t(x.by)]);
     }
 
     final bytes = excel.encode();
@@ -2901,6 +2926,8 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
                   icon: const Icon(Icons.photo_library_outlined, size: 18),
                   label: Text('Sipariş görselleri (${j.photoCount})'),
                 ),
+                const SizedBox(height: 6),
+                NotesButton(noteRef: NoteRef.job(j)),
                 if (j.finishNote.isNotEmpty) Text('Bitiş notu: ${j.finishNote}', style: const TextStyle(fontStyle: FontStyle.italic)),
                 const Divider(height: 20),
                 Text('Üretim: ${j.qtyText}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
@@ -2965,10 +2992,14 @@ Future<void> exportJobsExcel(MGroup g, List<MJob> jobs) async {
       labels.addAll((sm['stops'] as Map<String, int>).keys);
     }
     final lab = labels.toList()..sort();
+    Map<String, List<MNote>> notes = {};
+    try {
+      notes = await NotesOps.byModule(g.key);
+    } catch (_) {}
     sh.appendRow(<xl.CellValue?>[
       t('Sipariş no'), t('Ürün kodu'), t('Makine'), t(g.lineLabel), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Gün sayısı'), t('Üretim (adet)'), t('Üretim (kg)'),
       t('Paket fire (adet)'), t('Paket fire (kg)'), t('Ürün fire (adet)'), t('Ürün fire (kg)'),
-      t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), for (final l in lab) t('$l (dk)'), t('Son çalışan'), t('Son günlükçü'), if (g.operators) t('Son operatör'), t('Başlatan'), t('Bitiş notu'),
+      t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), for (final l in lab) t('$l (dk)'), t('Son çalışan'), t('Son günlükçü'), if (g.operators) t('Son operatör'), t('Başlatan'), t('Bitiş notu'), t('Notlar'),
     ]);
     for (final j in jobs) {
       final sm = sums[j.id]!;
@@ -2978,7 +3009,7 @@ Future<void> exportJobsExcel(MGroup g, List<MJob> jobs) async {
       sh.appendRow(<xl.CellValue?>[
         t(j.orderNo), t(j.productCode), t(j.machineName), t(j.line), t(j.statusLabel), t(fmtFull(j.startedAt)), t(j.finished ? fmtFull(j.finishedAt) : ''),
         n(j.dayCount), dbl(j.qtyAdet), dbl(j.qtyKg), dbl(j.fpAdet), dbl(j.fpKg), dbl(j.fuAdet), dbl(j.fuKg), n(mins(run)), n(mins(stop)), dbl(run + stop == 0 ? 0 : run * 100 / (run + stop)),
-        for (final l in lab) n(mins(st[l] ?? 0)), n(j.workers), n(j.daily), if (g.operators) n(j.operators), t(j.by), t(j.finishNote),
+        for (final l in lab) n(mins(st[l] ?? 0)), n(j.workers), n(j.daily), if (g.operators) n(j.operators), t(j.by), t(j.finishNote), t(NotesOps.joined(notes[j.id])),
       ]);
     }
     final bytes = excel.encode();

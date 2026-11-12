@@ -22,6 +22,7 @@ part 'pallet.dart';
 part 'machine.dart';
 part 'mfault.dart';
 part 'account.dart';
+part 'notes.dart';
 
 // ---------------------------------------------------------------------------
 // Ayarlar
