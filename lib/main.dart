@@ -23,6 +23,7 @@ part 'machine.dart';
 part 'mfault.dart';
 part 'account.dart';
 part 'notes.dart';
+part 'trash.dart';
 
 // ---------------------------------------------------------------------------
 // Ayarlar
@@ -2521,6 +2522,12 @@ class UsersView extends StatelessWidget {
               onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const PasswordLogsPage())),
               icon: const Icon(Icons.history),
               label: const Text('Şifre değişiklik kayıtları'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TrashPage())),
+              icon: const Icon(Icons.delete_sweep_outlined),
+              label: const Text('Silinenler (geri getir)'),
             ),
             const SizedBox(height: 10),
             const Text(

@@ -225,7 +225,7 @@ class PalletOps {
   }
 
   static Future<void> deletePallet(PalletOrder o, Pallet p) async {
-    await ref(o.id).collection('pallets').doc(p.id).delete();
+    await TrashOps.move(ref(o.id).collection('pallets').doc(p.id), kind: 'pallet', title: 'Sipariş ${o.orderNo} · Palet ${p.no}');
     await recompute(o.id);
   }
 
@@ -267,16 +267,9 @@ class PalletOps {
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
-  static Future<void> deleteOrder(PalletOrder o) async {
-    for (final sub in ['pallets', 'photos']) {
-      final s = await ref(o.id).collection(sub).get();
-      for (final d in s.docs) {
-        if (sub == 'photos') await deleteStoredPhoto(d.data()['path']);
-        await d.reference.delete();
-      }
-    }
-    await ref(o.id).delete();
-  }
+  // Çöp kutusuna taşınır (30 gün geri getirilebilir)
+  static Future<void> deleteOrder(PalletOrder o) =>
+      TrashOps.move(ref(o.id), kind: 'palletOrder', title: 'Sipariş ${o.orderNo}${o.customer.isEmpty ? '' : ' · ${o.customer}'}', subs: const ['pallets', 'photos']);
 
   static Future<void> addPhoto(PalletOrder o, Uint8List bytes) async {
     final up = await photoFields('palletOrders/${o.id}', bytes);

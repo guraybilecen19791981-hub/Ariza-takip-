@@ -527,21 +527,14 @@ class PackOps {
   }
 
   static Future<void> deleteEvent(PackOrder o, PackEvent e) async {
-    await ref(o.id).collection('events').doc(e.id).delete();
+    await TrashOps.move(ref(o.id).collection('events').doc(e.id), kind: 'packEvent', title: 'Sipariş ${o.orderNo} · ${e.displayText} (${fmtFull(e.t)})');
     await _addEvent(o.id, _event('duzenle', 'Kayıt silindi: ${e.displayText} (${fmtFull(e.t)})'));
     await recompute(o.id);
   }
 
-  static Future<void> deleteOrder(PackOrder o) async {
-    for (final sub in ['events', 'photos']) {
-      final s = await ref(o.id).collection(sub).get();
-      for (final d in s.docs) {
-        if (sub == 'photos') await deleteStoredPhoto(d.data()['path']);
-        await d.reference.delete();
-      }
-    }
-    await ref(o.id).delete();
-  }
+  // Çöp kutusuna taşınır (30 gün geri getirilebilir)
+  static Future<void> deleteOrder(PackOrder o) =>
+      TrashOps.move(ref(o.id), kind: 'packOrder', title: 'Sipariş ${o.orderNo} · ${o.productCode}', subs: const ['events', 'photos']);
 
   // Tüm hareketlerden toplamları, duruş sürelerini ve saatleri yeniden hesaplar
   static Future<void> recompute(String id) async {

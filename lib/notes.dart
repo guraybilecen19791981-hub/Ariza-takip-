@@ -178,7 +178,7 @@ class NotesPage extends StatelessWidget {
                     ? () async {
                         if (!await confirm(context, 'Not silinsin mi?', n.text, 'Sil')) return;
                         try {
-                          await NotesOps.col.doc(n.id).delete();
+                          await TrashOps.move(NotesOps.col.doc(n.id), kind: 'note', title: '${n.machineName.isEmpty ? n.orderNo : n.machineName} · ${n.text}');
                         } catch (e) {
                           toast('Silinemedi: $e');
                         }

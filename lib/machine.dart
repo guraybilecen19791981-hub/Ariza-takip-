@@ -34,11 +34,38 @@ MGroup mGroupOf(String key) => key == 'uretim' ? kUretim : kSargi;
 // Makine → panel eşlemesi. Eski uygulama sürümleri durum / üretim / sipariş kayıtlarına panel bilgisi
 // yazmadığı için kaydın paneli önce makinesinden bulunur; makine bilinmiyorsa kayıttaki alana bakılır.
 final Map<String, String> gMachineGroup = {};
+final Map<String, LineMachine> gMachineById = {};
+int gShiftSec = 0; // ilk vardiyanın süresi (eski sipariş kayıtlarında hedef hesabı için)
 void rememberMachineGroups(Iterable<LineMachine> ms) {
   for (final m in ms) {
     gMachineGroup[m.id] = m.group;
+    gMachineById[m.id] = m;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Üretim hedefi: makineye vardiya başına adet ya da kg hedefi verilir.
+// Beklenen üretim = vardiya hedefi × çalışılan süre ÷ vardiya süresi.
+// Çalışılan süre = çalışma + duruşlar (kapalı süre hedeften düşülür; duruşlar düşülmez, verimi düşürür).
+// Hedef verimi = gerçekleşen ÷ beklenen.
+// ---------------------------------------------------------------------------
+class TargetEff {
+  final double target;
+  final String unit;
+  final double expected;
+  final double done;
+  const TargetEff(this.target, this.unit, this.expected, this.done);
+  double get pct => expected <= 0 ? 0 : done * 100 / expected;
+  String get unitLabel => unit == 'kg' ? 'kg' : 'adet';
+  String get text => '${fmtQty(done)} / ${fmtQty(expected)} $unitLabel · %${pct.toStringAsFixed(0)}';
+}
+
+TargetEff? targetEff(double target, String unit, int trackedSec, int shiftSec, double adet, double kg) {
+  if (target <= 0 || shiftSec <= 0) return null;
+  return TargetEff(target, unit, target * trackedSec / shiftSec, unit == 'kg' ? kg : adet);
+}
+
+Color effColor(double p) => p >= 100 ? const Color(0xFF2B8A3E) : (p >= 80 ? const Color(0xFFD9480F) : const Color(0xFFC92A2A));
 
 bool recOwns(MGroup g, String machineId, String recGroup) {
   final mg = gMachineGroup[machineId];
@@ -110,6 +137,11 @@ class MShift {
   Map<String, dynamic> toMap() => {'name': name, 'start': start, 'end': end};
   int get sMin => _hm(start);
   int get eMin => _hm(end);
+  int get lenSec {
+    var d = eMin - sMin;
+    if (d <= 0) d += 1440;
+    return d * 60;
+  }
   String get times => '$start–$end';
   String get label => name.isEmpty ? times : '$name ($times)';
 }
@@ -212,6 +244,8 @@ class LineMachine {
   final String faultStatus;
   final String faultAssignee;
   final String faultByUid; // arızayı açan (onay verecek kişi)
+  final double target; // vardiya hedefi (0 = hedef yok)
+  final String targetUnit; // adet | kg
 
   LineMachine({
     required this.id,
@@ -244,6 +278,8 @@ class LineMachine {
     this.faultStatus = '',
     this.faultAssignee = '',
     this.faultByUid = '',
+    this.target = 0,
+    this.targetUnit = 'adet',
   });
 
   factory LineMachine.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -279,10 +315,14 @@ class LineMachine {
       faultStatus: (m['faultStatus'] ?? '').toString(),
       faultAssignee: (m['faultAssignee'] ?? '').toString(),
       faultByUid: (m['faultByUid'] ?? '').toString(),
+      target: _dbl(m['target']),
+      targetUnit: m['targetUnit'] == 'kg' ? 'kg' : 'adet',
     );
   }
 
   MGroup get grp => mGroupOf(group);
+  bool get hasTarget => target > 0;
+  String get targetText => hasTarget ? '${fmtQty(target)} ${targetUnit == 'kg' ? 'kg' : 'adet'} / vardiya' : '';
   bool get hasFault => faultId.isNotEmpty;
   String get peopleText => grp.peopleText(workers, daily, operators);
   String get jobFireText => fireText(jobFpAdet, jobFpKg, jobFuAdet, jobFuKg);
@@ -489,6 +529,9 @@ class MJob {
   final double fuAdet;
   final double fuKg;
   final int operators;
+  final double target; // sipariş başladığındaki makine vardiya hedefi
+  final String targetUnit;
+  final int shiftSec;
 
   MJob({
     required this.id,
@@ -517,6 +560,9 @@ class MJob {
     this.fuAdet = 0,
     this.fuKg = 0,
     this.operators = 0,
+    this.target = 0,
+    this.targetUnit = '',
+    this.shiftSec = 0,
   });
 
   factory MJob.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -551,7 +597,18 @@ class MJob {
       fuAdet: _dbl(m['fuAdet']),
       fuKg: _dbl(m['fuKg']),
       operators: _int(m['operators']),
+      target: _dbl(m['target']),
+      targetUnit: (m['targetUnit'] ?? '').toString(),
+      shiftSec: _int(m['shiftSec']),
     );
+  }
+
+  // Hedef verimi (siparişte hedef yoksa makinenin şimdiki hedefi kullanılır)
+  TargetEff? teff(int runSec0, int stopSec0) {
+    final mc = gMachineById[machineId];
+    final tg = target > 0 ? target : (mc?.target ?? 0);
+    final un = target > 0 ? (targetUnit.isEmpty ? 'adet' : targetUnit) : (mc?.targetUnit ?? 'adet');
+    return targetEff(tg, un, runSec0 + stopSec0, shiftSec > 0 ? shiftSec : gShiftSec, qtyAdet, qtyKg);
   }
 
   String get fireTxt => fireText(fpAdet, fpKg, fuAdet, fuKg);
@@ -879,8 +936,9 @@ class MachineOps {
 
   static Stream<List<MShift>> shiftsStream() => shiftCfg.snapshots().map((s) {
         final raw = s.data()?['items'];
-        if (raw is List && raw.isNotEmpty) return raw.map((e) => MShift.fromMap(e)).toList();
-        return List<MShift>.from(kDefaultShifts);
+        final l = (raw is List && raw.isNotEmpty) ? raw.map((e) => MShift.fromMap(e)).toList() : List<MShift>.from(kDefaultShifts);
+        gShiftSec = l.first.lenSec;
+        return l;
       });
 
   static Future<void> saveShifts(List<MShift> list) => shiftCfg.set({'items': list.map((r) => r.toMap()).toList()});
@@ -926,7 +984,9 @@ class MachineOps {
     return s.docs.map((d) => MEntry.fromDoc(d)).where((e) => recOwns(g, e.machineId, e.group)).toList();
   }
 
-  static Future<void> addMachine(MGroup g, String name, String line, int order) => col.add({
+  static Future<void> addMachine(MGroup g, String name, String line, int order, [double target = 0, String targetUnit = 'adet']) => col.add({
+        'target': target,
+        'targetUnit': targetUnit,
         'group': g.key,
         'name': name,
         'line': line,
@@ -945,10 +1005,10 @@ class MachineOps {
         'createdAt': FieldValue.serverTimestamp(),
       });
 
-  static Future<void> editMachine(LineMachine m, String name, String line, int order) =>
-      col.doc(m.id).update({'name': name, 'line': line, 'order': order});
+  static Future<void> editMachine(LineMachine m, String name, String line, int order, [double target = 0, String targetUnit = 'adet']) =>
+      col.doc(m.id).update({'name': name, 'line': line, 'order': order, 'target': target, 'targetUnit': targetUnit});
 
-  static Future<void> deleteMachine(LineMachine m) => col.doc(m.id).delete();
+  static Future<void> deleteMachine(LineMachine m) => TrashOps.move(col.doc(m.id), kind: 'machine', title: '${m.grp.title} · ${m.name}');
 
   static CollectionReference<Map<String, dynamic>> get jobs => db.collection('machineJobs');
 
@@ -1078,6 +1138,9 @@ class MachineOps {
       'runSec': 0,
       'stops': <String, int>{},
       'dayCount': 1,
+      'target': m.target,
+      'targetUnit': m.targetUnit,
+      'shiftSec': gShiftSec,
     });
     final upd = _switchLog(batch, m, now, kRunKey, 'Çalışıyor', '', jobId: job.id, orderNo: orderNo, productCode: productCode, workers: workers, daily: daily, operators: operators);
     upd.addAll({
@@ -1431,7 +1494,7 @@ class _MachineLiveState extends State<MachineLive> {
                           }
                           children.add(Padding(
                             padding: const EdgeInsets.only(bottom: 10),
-                            child: _MachineCard(m: m, stat: stats[m.id], reasons: reasons),
+                            child: _MachineCard(m: m, stat: stats[m.id], reasons: reasons, shiftSec: shift.lenSec),
                           ));
                         }
                         return ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 32), children: children);
@@ -1457,7 +1520,8 @@ class _MachineCard extends StatelessWidget {
   final LineMachine m;
   final MStat? stat;
   final List<MReason> reasons;
-  const _MachineCard({required this.m, required this.stat, required this.reasons});
+  final int shiftSec;
+  const _MachineCard({required this.m, required this.stat, required this.reasons, required this.shiftSec});
 
   @override
   Widget build(BuildContext context) {
@@ -1465,6 +1529,7 @@ class _MachineCard extends StatelessWidget {
     final st = stat;
     final enter = canMachineEnter(currentUser, m.grp);
     final tech = m.hasFault && canTechSee(currentUser);
+    final te = st == null ? null : targetEff(m.target, m.targetUnit, st.tracked, shiftSec, st.qtyAdet, st.qtyKg);
     return Card(
       margin: EdgeInsets.zero,
       color: m.off ? const Color(0xFFF8F9FA) : Colors.white,
@@ -1516,6 +1581,26 @@ class _MachineCard extends StatelessWidget {
               Text(
                 'Bu vardiya: verim %${(st?.efficiency ?? 0).toStringAsFixed(0)} · çalışma ${fmtSec(st?.run ?? 0)} · duruş ${fmtSec(st?.stopTotal ?? 0)} · üretim ${st?.qtyText ?? '—'}${(st?.hasFire ?? false) ? ' · ${st!.fireTxt}' : ''}',
                 style: const TextStyle(color: kMuted, fontSize: 13),
+              ),
+            if (m.hasTarget)
+              Container(
+                margin: const EdgeInsets.only(top: 6, bottom: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(color: const Color(0xFFF1F3F5), borderRadius: BorderRadius.circular(8)),
+                child: Row(children: [
+                  const Icon(Icons.flag_outlined, size: 18, color: kMuted),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      te == null || te.expected <= 0
+                          ? 'Hedef: ${m.targetText}'
+                          : 'Hedef ${m.targetText} · şu ana kadar ${fmtQty(te.done)} / ${fmtQty(te.expected)} ${te.unitLabel}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ),
+                  if (te != null && te.expected > 0)
+                    Text('%${te.pct.toStringAsFixed(0)}', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: effColor(te.pct))),
+                ]),
               ),
             Text(m.off ? 'Kapalı · ${fmtDT(m.since)}' : '${m.by.isEmpty ? '' : '${m.by} · '}${fmtDT(m.since)}${enter ? ' · dokunun' : ''}',
                 style: const TextStyle(color: kMuted, fontSize: 12)),
@@ -2009,6 +2094,11 @@ class _MachineReportPageState extends State<MachineReportPage> {
     await _load();
   }
 
+  TargetEff? _teff(MStat s) {
+    final m = _machines.where((x) => x.id == s.id).firstOrNull;
+    return m == null ? null : targetEff(m.target, m.targetUnit, s.tracked, _shift.lenSec, s.qtyAdet, s.qtyKg);
+  }
+
   List<LineMachine> get _visibleMachines => _machines.where((m) => _line.isEmpty || m.line == _line).toList();
 
   Future<void> _load() async {
@@ -2164,7 +2254,8 @@ class _MachineReportPageState extends State<MachineReportPage> {
         const SizedBox(height: 6),
         Text(
           'Her gün için ${_shift.times} aralığı raporlanır (${wins.length} vardiya). Toplam duruş = duruş nedenlerinin toplamı. '
-          'Verimlilik = çalışma ÷ (çalışma + toplam duruş); kapalı süre verime girmez. Her durum kaydı bir sonraki kaydın başladığı anda biter, hiçbir süre iki kez sayılmaz.',
+          'Verimlilik = çalışma ÷ (çalışma + toplam duruş); kapalı süre verime girmez. '
+          'Hedef verimi = gerçekleşen üretim ÷ (vardiya hedefi × çalışılan süre ÷ vardiya süresi). Her durum kaydı bir sonraki kaydın başladığı anda biter, hiçbir süre iki kez sayılmaz.',
           style: const TextStyle(color: kMuted, fontSize: 12),
         ),
         const SizedBox(height: 12),
@@ -2199,6 +2290,9 @@ class _MachineReportPageState extends State<MachineReportPage> {
                 Text('Çalışılan süre ${fmtMin(statMin(s).tracked)} = çalışma ${fmtMin(statMin(s).run)} + toplam duruş ${fmtMin(statMin(s).stop)}',
                     style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                 Text('Üretim ${s.qtyText}', style: const TextStyle(fontSize: 13)),
+                if (_teff(s) != null)
+                  Text('Hedef verimi %${_teff(s)!.pct.toStringAsFixed(1)} · ${fmtQty(_teff(s)!.done)} / ${fmtQty(_teff(s)!.expected)} ${_teff(s)!.unitLabel} (vardiya hedefi ${fmtQty(_teff(s)!.target)})',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: effColor(_teff(s)!.pct))),
                 Text(
                     '${s.shifts} vardiya çalışıldı${s.skipped > 0 ? ' (${s.skipped} kapalı vardiya sayılmadı)' : ''} · vardiya süresi ${fmtMin(statMin(s).span)}'
                     '${statMin(s).off > 0 ? ' · ara kapalı ${fmtMin(statMin(s).off)}' : ''}${statMin(s).none > 0 ? ' · kayıt yok ${fmtMin(statMin(s).none)}' : ''}',
@@ -2269,10 +2363,19 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     List<xl.CellValue?> fireCells(MStat s) => [dbl(s.fpAdet), dbl(s.fpKg), dbl(s.fuAdet), dbl(s.fuKg)];
 
     final mm = <String, MStatMin>{for (final s in list) s.id: statMin(s)};
+    final mById = {for (final m in machines) m.id: m};
+    TargetEff? te(String mid, MStat s) {
+      final m = mById[mid];
+      return m == null ? null : targetEff(m.target, m.targetUnit, s.tracked, shift.lenSec, s.qtyAdet, s.qtyKg);
+    }
+
+    final teHead = [t('Hedef verimi %'), t('Vardiya hedefi'), t('Hedef birimi'), t('Beklenen üretim'), t('Gerçekleşen')];
+    List<xl.CellValue?> teCells(TargetEff? x) =>
+        x == null ? [null, null, null, null, null] : [dbl(x.pct), dbl(x.target), t(x.unitLabel), dbl(x.expected), dbl(x.done)];
     sh.appendRow(<xl.CellValue?>[t('${g.title} raporu'), t('${fmtDay(wins.first.day)} – ${fmtDay(wins.last.day)}'), t('Vardiya: ${shift.label}')]);
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
-      t('Makine'), t(hl), t('Verimlilik %'), t('Çalışılan süre (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'),
+      t('Makine'), t(hl), t('Verimlilik %'), ...teHead, t('Çalışılan süre (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'),
       for (final l in lab) t('$l (dk)'),
       t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead, t('Ürünler'),
       t('Çalışılan vardiya'), t('Kapalı vardiya (sayılmadı)'), t('Vardiya süresi (dk)'), t('Ara kapalı (dk)'), t('Kayıt yok (dk)'),
@@ -2280,7 +2383,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     for (final s in list) {
       final m = mm[s.id]!;
       sh.appendRow(<xl.CellValue?>[
-        t(s.name), t(s.line), dbl(s.efficiency), n(m.tracked), n(m.run), n(m.stop),
+        t(s.name), t(s.line), dbl(s.efficiency), ...teCells(te(s.id, s)), n(m.tracked), n(m.run), n(m.stop),
         for (final l in lab) n(m.stops[l] ?? 0),
         dbl(s.qtyAdet), dbl(s.qtyKg), ...fireCells(s), t(s.products.join(', ')),
         n(s.shifts), n(s.skipped), n(m.span), n(m.off), n(m.none),
@@ -2291,6 +2394,9 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
       t('Çalışılan süre = Çalışma + Toplam duruş. Toplam duruş = kapalı hariç tüm duruş nedenlerinin toplamı. Verimlilik = Çalışma ÷ Çalışılan süre.')
     ]);
     sh.appendRow(<xl.CellValue?>[
+      t('Hedef verimi = Gerçekleşen ÷ Beklenen üretim. Beklenen üretim = Vardiya hedefi × Çalışılan süre ÷ Vardiya süresi (${shift.times}). Kapalı süre hedeften düşülür, duruşlar düşülmez.')
+    ]);
+    sh.appendRow(<xl.CellValue?>[
       t('Makinenin baştan sona kapalı olduğu vardiyalar (hafta sonu, çalışılmayan gün) hiç sayılmaz. Çalışılan vardiyalarda: Vardiya süresi = Çalışılan süre + Ara kapalı + Kayıt yok.')
     ]);
     sh.appendRow(<xl.CellValue?>[
@@ -2299,7 +2405,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
 
     // Vardiya bazlı: her makinenin vardiya satırları toplamı Özet ile aynı
     byShift.appendRow(<xl.CellValue?>[
-      t('Tarih'), t('Vardiya'), t('Makine'), t(hl), t('Ara kapalı (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'),
+      t('Tarih'), t('Vardiya'), t('Makine'), t(hl), t('Ara kapalı (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), ...teHead, t('Üretim (adet)'), t('Üretim (kg)'),
       ...fireHead, t('En çok duruş nedeni'),
     ]);
     final perWin = [for (final w in wins) computeMStats(machines, logs, entries, [w])];
@@ -2319,7 +2425,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
         final top = x.stops.entries.isEmpty ? null : (x.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
         byShift.appendRow(<xl.CellValue?>[
           t(fmtDay(w.day)), t('${_hmText(w.s.hour * 60 + w.s.minute)}–${_hmText(w.e.hour * 60 + w.e.minute)}'), t(s.name), t(s.line),
-          n(offR[k]), n(runR[k]), n(stopR[k]), dbl(x.efficiency), dbl(x.qtyAdet), dbl(x.qtyKg), ...fireCells(x),
+          n(offR[k]), n(runR[k]), n(stopR[k]), dbl(x.efficiency), ...teCells(te(s.id, x)), dbl(x.qtyAdet), dbl(x.qtyKg), ...fireCells(x),
           t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
         ]);
       }
@@ -2366,7 +2472,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     // Sipariş bazlı: siparişsiz süreler de ayrı satırda; her makinenin satır toplamı Özet ile aynı
     final xl.Sheet byJob = excel['Sipariş bazlı'];
     byJob.appendRow(<xl.CellValue?>[
-      t('Makine'), t(hl), t('Sipariş no'), t('Ürün kodu'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
+      t('Makine'), t(hl), t('Sipariş no'), t('Ürün kodu'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), ...teHead, t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
       t('Kişi (son)'), t('En çok duruş nedeni'),
     ]);
     final jobs = <String, _JobAgg>{};
@@ -2401,7 +2507,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
         final k = rows[i];
         final top = k.st.stops.entries.isEmpty ? null : (k.st.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
         byJob.appendRow(<xl.CellValue?>[
-          t(s.name), t(s.line), t(k.jobId.isEmpty ? '(siparişsiz)' : k.orderNo), t(k.jobId.isEmpty ? '' : k.productCode), n(runR[i]), n(stopR[i]), dbl(k.st.efficiency),
+          t(s.name), t(s.line), t(k.jobId.isEmpty ? '(siparişsiz)' : k.orderNo), t(k.jobId.isEmpty ? '' : k.productCode), n(runR[i]), n(stopR[i]), dbl(k.st.efficiency), ...teCells(te(s.id, k.st)),
           dbl(k.st.qtyAdet), dbl(k.st.qtyKg), ...fireCells(k.st), k.jobId.isEmpty ? null : n(k.ppl), t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
         ]);
       }
@@ -2446,9 +2552,11 @@ class MachineSettingsPage extends StatelessWidget {
     final line = TextEditingController(text: m?.line ?? (group.defaultLines.isNotEmpty ? group.defaultLines.first : ''));
     final chips = <String>{...group.defaultLines, ...lines.where((x) => x.isNotEmpty)}.toList();
     final order = TextEditingController(text: '${m?.order ?? nextOrder}');
+    final target = TextEditingController(text: (m?.target ?? 0) > 0 ? fmtQty(m!.target).replaceAll('.', '') : '');
+    var tUnit = m?.targetUnit ?? 'adet';
     final ok = await showDialog<bool>(
       context: context,
-      builder: (d) => AlertDialog(
+      builder: (d) => StatefulBuilder(builder: (d, setS) => AlertDialog(
         title: Text(m == null ? 'Makine ekle' : 'Makineyi düzenle'),
         content: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2463,21 +2571,43 @@ class MachineSettingsPage extends StatelessWidget {
               ]),
             const SizedBox(height: 10),
             TextField(controller: order, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Sıra')),
+            const SizedBox(height: 14),
+            const Text('Üretim hedefi (vardiya başına)', style: TextStyle(fontWeight: FontWeight.w700)),
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: target,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: 'Hedef (boş = hedef yok)'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              for (final u in kMUnits.entries)
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: ChoiceChip(label: Text(u.value), selected: tUnit == u.key, onSelected: (_) => setS(() => tUnit = u.key)),
+                ),
+            ]),
+            Text(
+                'Hedef bir vardiya${gShiftSec > 0 ? ' (${fmtSec(gShiftSec)})' : ''} için verilir. Hedef verimi = yapılan ÷ (hedef × çalışılan süre ÷ vardiya süresi). '
+                'Kapalı süre hedeften düşülür, duruşlar düşülmez.',
+                style: const TextStyle(color: kMuted, fontSize: 12)),
           ]),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Vazgeç')),
           FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Kaydet')),
         ],
-      ),
+      )),
     );
     if (ok != true || name.text.trim().isEmpty) return;
     try {
       final o = int.tryParse(order.text.trim()) ?? nextOrder;
+      final tg = double.tryParse(target.text.trim().replaceAll(' ', '').replaceAll(',', '.')) ?? 0;
       if (m == null) {
-        await MachineOps.addMachine(group, name.text.trim(), line.text.trim(), o);
+        await MachineOps.addMachine(group, name.text.trim(), line.text.trim(), o, tg < 0 ? 0 : tg, tUnit);
       } else {
-        await MachineOps.editMachine(m, name.text.trim(), line.text.trim(), o);
+        await MachineOps.editMachine(m, name.text.trim(), line.text.trim(), o, tg < 0 ? 0 : tg, tUnit);
       }
     } catch (e) {
       toast('Kaydedilemedi: $e');
@@ -2637,7 +2767,7 @@ class MachineSettingsPage extends StatelessWidget {
                     for (final m in machines)
                       _row(
                         title: Text(m.name),
-                        subtitle: '${m.line.isEmpty ? group.noLine : m.line} · sıra ${m.order}',
+                        subtitle: '${m.line.isEmpty ? group.noLine : m.line} · sıra ${m.order}${m.hasTarget ? ' · hedef ${m.targetText}' : ''}',
                         onEdit: () => _machineDialog(context, m, m.order, lines),
                         onDelete: () async {
                           if (!await confirm(context, 'Makine silinsin mi?', '${m.name} listeden kalkar. Geçmiş kayıtları raporlarda kalır.', 'Sil')) return;
@@ -2886,6 +3016,9 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
                         style: const TextStyle(color: kMuted, fontSize: 13)),
                     Text('Üretim: ${j.qtyText}${j.finished || j.runSec > 0 ? ' · verim %${j.efficiency.toStringAsFixed(0)}' : ''}',
                         style: const TextStyle(fontWeight: FontWeight.w600)),
+                    if (j.teff(j.runSec, j.stopSec) != null && j.runSec + j.stopSec > 0)
+                      Text('Hedef verimi %${j.teff(j.runSec, j.stopSec)!.pct.toStringAsFixed(0)} · ${j.teff(j.runSec, j.stopSec)!.text}',
+                          style: TextStyle(fontWeight: FontWeight.w700, color: effColor(j.teff(j.runSec, j.stopSec)!.pct))),
                     if (j.fireTxt.isNotEmpty) Text('Fire: ${j.fireTxt}', style: const TextStyle(color: Color(0xFFC92A2A), fontSize: 13)),
                   ])),
                 ),
@@ -2934,6 +3067,9 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
                 if (j.fireTxt.isNotEmpty) Text('Fire: ${j.fireTxt}', style: const TextStyle(color: Color(0xFFC92A2A), fontWeight: FontWeight.w600)),
                 Text('Verimlilik: %${eff.toStringAsFixed(1)} · çalışma ${fmtSec(run)} · duruş ${fmtSec(stop)}',
                     style: const TextStyle(fontWeight: FontWeight.w600)),
+                if (j.teff(run, stop) != null && run + stop > 0)
+                  Text('Hedef verimi: %${j.teff(run, stop)!.pct.toStringAsFixed(1)} · yapılan ${fmtQty(j.teff(run, stop)!.done)} / beklenen ${fmtQty(j.teff(run, stop)!.expected)} ${j.teff(run, stop)!.unitLabel} (vardiya hedefi ${fmtQty(j.teff(run, stop)!.target)})',
+                      style: TextStyle(fontWeight: FontWeight.w700, color: effColor(j.teff(run, stop)!.pct))),
                 if (snap.connectionState == ConnectionState.waiting) const LinearProgressIndicator(),
                 for (final e in (stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))))
                   Padding(
@@ -2950,7 +3086,8 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
                           return;
                         }
                         try {
-                          await MachineOps.jobs.doc(j.id).delete();
+                          await TrashOps.move(MachineOps.jobs.doc(j.id),
+                              kind: 'machineJob', title: 'Sipariş ${j.orderNo} · ${j.machineName}', subs: const ['photos']);
                           if (c.mounted) Navigator.pop(c);
                           toast('Silindi');
                         } catch (e) {
@@ -2999,16 +3136,19 @@ Future<void> exportJobsExcel(MGroup g, List<MJob> jobs) async {
     sh.appendRow(<xl.CellValue?>[
       t('Sipariş no'), t('Ürün kodu'), t('Makine'), t(g.lineLabel), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Gün sayısı'), t('Üretim (adet)'), t('Üretim (kg)'),
       t('Paket fire (adet)'), t('Paket fire (kg)'), t('Ürün fire (adet)'), t('Ürün fire (kg)'),
-      t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), for (final l in lab) t('$l (dk)'), t('Son çalışan'), t('Son günlükçü'), if (g.operators) t('Son operatör'), t('Başlatan'), t('Bitiş notu'), t('Notlar'),
+      t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), t('Hedef verimi %'), t('Vardiya hedefi'), t('Hedef birimi'), t('Beklenen üretim'), t('Gerçekleşen'),
+      for (final l in lab) t('$l (dk)'), t('Son çalışan'), t('Son günlükçü'), if (g.operators) t('Son operatör'), t('Başlatan'), t('Bitiş notu'), t('Notlar'),
     ]);
     for (final j in jobs) {
       final sm = sums[j.id]!;
       final run = sm['runSec'] as int;
       final st = sm['stops'] as Map<String, int>;
       final stop = st.values.fold(0, (a, b) => a + b);
+      final tx = run + stop > 0 ? j.teff(run, stop) : null;
       sh.appendRow(<xl.CellValue?>[
         t(j.orderNo), t(j.productCode), t(j.machineName), t(j.line), t(j.statusLabel), t(fmtFull(j.startedAt)), t(j.finished ? fmtFull(j.finishedAt) : ''),
         n(j.dayCount), dbl(j.qtyAdet), dbl(j.qtyKg), dbl(j.fpAdet), dbl(j.fpKg), dbl(j.fuAdet), dbl(j.fuKg), n(mins(run)), n(mins(stop)), dbl(run + stop == 0 ? 0 : run * 100 / (run + stop)),
+        tx == null ? null : dbl(tx.pct), tx == null ? null : dbl(tx.target), t(tx == null ? '' : tx.unitLabel), tx == null ? null : dbl(tx.expected), tx == null ? null : dbl(tx.done),
         for (final l in lab) n(mins(st[l] ?? 0)), n(j.workers), n(j.daily), if (g.operators) n(j.operators), t(j.by), t(j.finishNote), t(NotesOps.joined(notes[j.id])),
       ]);
     }
