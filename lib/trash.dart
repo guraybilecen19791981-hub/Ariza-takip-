@@ -16,6 +16,7 @@ const Map<String, String> kTrashKinds = {
   'machineJob': 'Makine siparişi (arşiv)',
   'machine': 'Makine',
   'note': 'Not',
+  'machineFault': 'Makine arızası',
 };
 
 class TrashItem {

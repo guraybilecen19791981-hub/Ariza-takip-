@@ -710,11 +710,13 @@ class Watchers {
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _machSub;
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _fAssignSub;
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _fApproveSub;
+  static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _fHelperSub;
+  static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _fMgrSub;
   static String _key = '';
   static final Set<String> _seen = <String>{};
 
   static Future<void> ensure(AppUser u) async {
-    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}|${u.perm('teknik')}';
+    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}|${u.perm('teknik')}|${u.perm('hat')}|${u.perm('uretim')}|${u.lines.join(',')}';
     if (key == _key) return;
     await stop();
     _key = key;
@@ -813,6 +815,43 @@ class Watchers {
         first = false;
       }, onError: (_) {});
     }
+    // 2. teknisyen (yardımcı) olarak eklenince
+    if (u.can('teknik', 'gir') || u.isAdmin) {
+      var first = true;
+      _fHelperSub = MFaultOps.col.where('assignee2Open', isEqualTo: u.uid).snapshots().listen((s) {
+        if (!first) {
+          for (final c in s.docChanges) {
+            if (c.type != DocumentChangeType.added) continue;
+            final f = MFault.fromDoc(c.doc);
+            Notifier.faultInfo(f.id, '2. teknisyen olarak eklendiniz: ${f.machineName}', '${f.desc} · ${f.assigneeName}');
+          }
+        }
+        first = false;
+      }, onError: (_) {});
+    }
+    // Panel yöneticisine: Girer yetkilinin açtığı arıza / düzenleme onay bekliyor
+    if (u.isAdmin || canMachineManage(u, kSargi) || canMachineManage(u, kUretim)) {
+      var first = true;
+      try {
+        final ms = await MachineOps.col.get();
+        rememberMachineGroups(ms.docs.map((d) => LineMachine.fromDoc(d)));
+      } catch (_) {}
+      _fMgrSub = MFaultOps.col.where('mgrPending', isEqualTo: true).snapshots().listen((s) {
+        if (!first) {
+          for (final c in s.docChanges) {
+            if (c.type != DocumentChangeType.added) continue;
+            final f = MFault.fromDoc(c.doc);
+            if (!canMgrApprove(u, f)) continue;
+            if (f.status == 'yonay') {
+              Notifier.faultInfo(f.id, 'Arıza onayınızı bekliyor: ${f.machineName}', '${f.desc} · ${f.reportedBy}');
+            } else if (f.hasPendingEdit) {
+              Notifier.faultInfo(f.id, 'Arıza düzenlemesi onay bekliyor: ${f.machineName}', '${f.pendingEdit!['desc'] ?? ''} · ${f.pendingEdit!['by'] ?? ''}');
+            }
+          }
+        }
+        first = false;
+      }, onError: (_) {});
+    }
     // Arızayı açana: teknisyen bitirdi, onay bekleniyor
     {
       var first = true;
@@ -846,6 +885,10 @@ class Watchers {
     await _machSub?.cancel();
     await _fAssignSub?.cancel();
     await _fApproveSub?.cancel();
+    await _fHelperSub?.cancel();
+    await _fMgrSub?.cancel();
+    _fHelperSub = null;
+    _fMgrSub = null;
     _fAssignSub = null;
     _fApproveSub = null;
     _packSub = null;

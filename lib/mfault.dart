@@ -7,16 +7,29 @@ part of 'main.dart';
 // ---------------------------------------------------------------------------
 
 const Map<String, String> kMFaultStatus = {
+  'yonay': 'Yönetici onayı bekliyor',
   'acik': 'Bildirildi, atama bekliyor',
   'atandi': 'Teknisyen atandı',
   'basladi': 'Müdahale ediliyor',
+  'parca': 'Parça bekliyor',
+  'arastir': 'Arıza araştırılıyor',
   'onay': 'Onay bekliyor',
   'kapandi': 'Kapandı',
+  'iptal': 'Reddedildi (arıza değil)',
 };
-const List<String> kMFaultOpen = ['acik', 'atandi', 'basladi', 'onay'];
+const List<String> kMFaultOpen = ['yonay', 'acik', 'atandi', 'basladi', 'parca', 'arastir', 'onay'];
+const List<String> kMFaultWorking = ['basladi', 'parca', 'arastir'];
 
 Color mFaultColor(String s) {
   switch (s) {
+    case 'yonay':
+      return const Color(0xFF862E9C);
+    case 'parca':
+      return const Color(0xFFE67700);
+    case 'arastir':
+      return const Color(0xFF0B7285);
+    case 'iptal':
+      return const Color(0xFF868E96);
     case 'acik':
       return const Color(0xFFC92A2A);
     case 'atandi':
@@ -35,6 +48,20 @@ bool canTechSee(AppUser? me) => me != null && (me.isAdmin || me.can('teknik', 'g
 bool canTechWork(AppUser? me) => me != null && (me.isAdmin || me.can('teknik', 'gir'));
 bool canTechManage(AppUser? me) => me != null && (me.isAdmin || me.can('teknik', 'yonet'));
 bool canApproveFault(AppUser? me, MGroup g, String reporterUid) => me != null && (me.uid == reporterUid || canMachineManage(me, g));
+
+// Kullanıcı bu hattı / bölgeyi görüyor mu (Yönetir yetkisinde de atanan hatlar geçerli)
+bool userSeesLine(AppUser? me, MGroup g, String line) {
+  if (me == null) return false;
+  final gl = gMachineById.values.where((m) => g.owns(m.group)).map((m) => m.line).toSet()..add(line);
+  final vis = visibleLines(me, g, gl);
+  return vis == null || vis.contains(line);
+}
+
+// Arıza açma / düzenleme yöneticinin onayına düşer mi? (Girer / Düzenler yetkisi)
+bool faultNeedsMgr(AppUser? me, MGroup g) => me != null && !me.isAdmin && !canMachineManage(me, g) && !canTechManage(me);
+
+// Panel yöneticisi (Yönetir / Onay) ya da admin: Girer yetkilinin açtığı arızayı / düzenlemeyi onaylar
+bool canMgrApprove(AppUser? me, MFault f) => me != null && (me.isAdmin || (canMachineManage(me, f.grp) && userSeesLine(me, f.grp, f.line)));
 
 class MFault {
   final String id;
@@ -65,6 +92,14 @@ class MFault {
   final int rejectCount;
   final int photoCount;
   final List<Map<String, dynamic>> log;
+  final String assignee2Uid; // 2. teknisyen (yardımcı)
+  final String assignee2Name;
+  final DateTime? holdAt; // parça bekliyor / araştırılıyor başlangıcı
+  final String holdNote;
+  final int partSec; // biten parça bekleme süreleri toplamı
+  final int researchSec; // biten araştırma süreleri toplamı
+  final Map<String, dynamic>? pendingEdit; // yönetici onayı bekleyen düzenleme
+  final String cancelNote;
 
   MFault({
     required this.id,
@@ -95,6 +130,14 @@ class MFault {
     required this.rejectCount,
     required this.photoCount,
     required this.log,
+    this.assignee2Uid = '',
+    this.assignee2Name = '',
+    this.holdAt,
+    this.holdNote = '',
+    this.partSec = 0,
+    this.researchSec = 0,
+    this.pendingEdit,
+    this.cancelNote = '',
   });
 
   factory MFault.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -137,12 +180,25 @@ class MFault {
       rejectCount: _int(m['rejectCount']),
       photoCount: _int(m['photoCount']),
       log: log,
+      assignee2Uid: s('assignee2Uid'),
+      assignee2Name: s('assignee2Name'),
+      holdAt: tsToDate(m['holdAt']),
+      holdNote: s('holdNote'),
+      partSec: _int(m['partSec']),
+      researchSec: _int(m['researchSec']),
+      pendingEdit: m['pendingEdit'] is Map ? Map<String, dynamic>.from(m['pendingEdit'] as Map) : null,
+      cancelNote: s('cancelNote'),
     );
   }
 
   MGroup get grp => mGroupOf(group);
-  bool get open => status != 'kapandi';
+  bool get open => status != 'kapandi' && status != 'iptal';
+  bool get cancelled => status == 'iptal';
+  bool get working => kMFaultWorking.contains(status);
+  bool get onHold => status == 'parca' || status == 'arastir';
+  bool get hasPendingEdit => pendingEdit != null && (pendingEdit!['desc'] ?? '').toString().isNotEmpty;
   String get statusLabel => kMFaultStatus[status] ?? status;
+  String get techText => [assigneeName, assignee2Name].where((x) => x.isNotEmpty).join(' + ');
 
   int _sec(DateTime? a, DateTime? b) {
     if (a == null) return 0;
@@ -153,8 +209,14 @@ class MFault {
 
   // Bildirimden atamaya (atama yoksa başlamaya) kadar geçen bekleme
   int get waitSec => _sec(createdAt, assignedAt ?? startedAt ?? (open ? null : approvedAt));
-  // Onarım: "Başladım"dan "Bitti"ye (devam ediyorsa şu ana kadar)
-  int get repairSec => startedAt == null ? 0 : _sec(startedAt, doneAt ?? (status == 'basladi' ? null : approvedAt));
+  // Varış: atamadan teknisyenin "Başladım" demesine kadar (kaç dakikada arızaya gitti)
+  int get arriveSec => (assignedAt == null || startedAt == null) ? 0 : _sec(assignedAt, startedAt);
+  // Onarım: "Başladım"dan "Bitti"ye (devam ediyorsa şu ana kadar); parça bekleme ve araştırma dahil
+  int get repairSec => startedAt == null ? 0 : _sec(startedAt, doneAt ?? (working ? null : approvedAt));
+  // Parça bekleme ve araştırma süreleri (sürüyorsa şu ana kadar)
+  int get partNow => partSec + (status == 'parca' ? _sec(holdAt, null) : 0);
+  int get researchNow => researchSec + (status == 'arastir' ? _sec(holdAt, null) : 0);
+  int get holdRunning => onHold ? _sec(holdAt, null) : 0;
   // Onay bekleme: "Bitti"den onaya
   int get approvalSec => doneAt == null ? 0 : _sec(doneAt, approvedAt);
   // Toplam duruş: bildirimden onaya
@@ -195,10 +257,12 @@ class MFaultOps {
     final ref = col.doc();
     final uid = currentUser?.uid ?? '';
     final name = currentUser?.name ?? '';
+    final mgr = faultNeedsMgr(currentUser, m.grp);
+    final st0 = mgr ? 'yonay' : 'acik';
     await MachineOps.setState(m, r.key, r.label, true, desc,
         force: true,
-        fault: true,
-        extraMachine: {'faultId': ref.id, 'faultStatus': 'acik', 'faultAssignee': '', 'faultByUid': uid},
+        fault: !mgr, // yönetici onayı gerekiyorsa teknik hizmete alarm onaydan sonra gider
+        extraMachine: {'faultId': ref.id, 'faultStatus': st0, 'faultAssignee': '', 'faultByUid': uid},
         extraWrites: (b) {
           b.set(ref, {
             'code': _code(now),
@@ -212,7 +276,8 @@ class MFaultOps {
             'desc': desc,
             'reasonKey': r.key,
             'reasonLabel': r.label,
-            'status': 'acik',
+            'status': st0,
+            'mgrPending': mgr,
             'reportedByUid': uid,
             'reportedBy': name,
             'createdAt': Timestamp.fromDate(now),
@@ -230,7 +295,12 @@ class MFaultOps {
             'photoCount': photos.length,
             'assigneeOpen': '',
             'awaitApproval': '',
-            'log': [_ev('Arıza bildirildi: $desc')],
+            'assignee2Uid': '',
+            'assignee2Name': '',
+            'assignee2Open': '',
+            'partSec': 0,
+            'researchSec': 0,
+            'log': [_ev('Arıza bildirildi: $desc${mgr ? ' (yönetici onayı bekleniyor)' : ''}')],
           });
           b.set(MachineOps.entries.doc(), MachineOps._entryData(m, 'ariza', now, text: 'Arıza bildirildi: $desc'));
         });
@@ -265,6 +335,165 @@ class MFaultOps {
     final m = await _machine(f.machineId);
     if (m == null || m.faultId != f.id) return;
     await MachineOps.col.doc(m.id).update(data);
+  }
+
+  // Yönetici onayı: Girer yetkilinin açtığı arıza geçerli → teknik hizmete alarm gider
+  static Future<void> mgrApprove(MFault f) async {
+    final m = await _machine(f.machineId);
+    final b = db.batch();
+    b.update(col.doc(f.id), {
+      'status': 'acik',
+      'mgrPending': f.hasPendingEdit,
+      'mgrApprovedBy': currentUser?.name ?? '',
+      'mgrApprovedAt': Timestamp.now(),
+      'log': FieldValue.arrayUnion([_ev('Yönetici onayladı, teknik hizmete gönderildi')]),
+    });
+    if (m != null && m.faultId == f.id) b.update(MachineOps.col.doc(m.id), {'faultStatus': 'acik'});
+    b.set(db.collection('machineAlerts').doc(), {
+      'group': f.group,
+      'machineId': f.machineId,
+      'machineName': f.machineName,
+      'line': f.line,
+      'label': f.reasonLabel.isEmpty ? 'Arızalı' : f.reasonLabel,
+      'note': f.desc,
+      'orderNo': f.orderNo,
+      'fault': true,
+      'by': f.reportedBy,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+    await b.commit();
+  }
+
+  // Yönetici reddeder: arıza değil, kayıt kapanır, makine çalışır
+  static Future<void> mgrReject(MFault f, String note) async {
+    final now = DateTime.now();
+    final m = await _machine(f.machineId);
+    void writes(WriteBatch b) {
+      b.update(col.doc(f.id), {
+        'status': 'iptal',
+        'mgrPending': false,
+        'pendingEdit': null,
+        'cancelNote': note,
+        'approvedAt': Timestamp.fromDate(now),
+        'approvedBy': currentUser?.name ?? '',
+        'approvedByUid': currentUser?.uid ?? '',
+        'assigneeOpen': '',
+        'assignee2Open': '',
+        'awaitApproval': '',
+        'log': FieldValue.arrayUnion([_ev('Yönetici reddetti (arıza değil): $note')]),
+      });
+    }
+
+    const clear = {'faultId': '', 'faultStatus': '', 'faultAssignee': '', 'faultByUid': ''};
+    if (m != null && m.faultId == f.id && !m.off) {
+      await MachineOps.setState(m, kRunKey, 'Çalışıyor', false, 'Arıza reddedildi: $note',
+          extraMachine: Map<String, dynamic>.from(clear), extraWrites: writes, force: true);
+      return;
+    }
+    final b = db.batch();
+    writes(b);
+    if (m != null && m.faultId == f.id) b.update(MachineOps.col.doc(m.id), Map<String, dynamic>.from(clear));
+    await b.commit();
+  }
+
+  // Düzenleme: yönetici / admin doğrudan; Girer yetkili yöneticinin onayına gönderir
+  static Future<bool> edit(MFault f, String desc, String doneNote) async {
+    final me = currentUser;
+    final direct = !faultNeedsMgr(me, f.grp);
+    if (direct) {
+      final ch = <String>[
+        if (desc != f.desc) 'açıklama: "${f.desc}" → "$desc"',
+        if (doneNote != f.doneNote) 'yapılan iş: "${f.doneNote}" → "$doneNote"',
+      ];
+      if (ch.isEmpty) return true;
+      await col.doc(f.id).update({'desc': desc, 'doneNote': doneNote, 'log': FieldValue.arrayUnion([_ev('Düzenlendi: ${ch.join(', ')}')])});
+      return true;
+    }
+    if (desc == f.desc) return true;
+    await col.doc(f.id).update({
+      'pendingEdit': {'desc': desc, 'by': me?.name ?? '', 'byUid': me?.uid ?? '', 't': Timestamp.now()},
+      'mgrPending': true,
+      'log': FieldValue.arrayUnion([_ev('Düzenleme yönetici onayına gönderildi: "$desc"')]),
+    });
+    return false;
+  }
+
+  static Future<void> mgrEditDecision(MFault f, bool ok) async {
+    final pe = f.pendingEdit;
+    if (pe == null) return;
+    await col.doc(f.id).update({
+      if (ok) 'desc': (pe['desc'] ?? f.desc).toString(),
+      'pendingEdit': null,
+      'mgrPending': f.status == 'yonay',
+      'log': FieldValue.arrayUnion([_ev(ok ? 'Düzenleme onaylandı: "${f.desc}" → "${pe['desc']}"' : 'Düzenleme reddedildi: "${pe['desc']}"')]),
+    });
+  }
+
+  // Admin: arızayı siler (30 gün Silinenler'de bekler); makinedeki arıza bağlantısı kalkar
+  static Future<void> remove(MFault f) async {
+    final m = await _machine(f.machineId);
+    await TrashOps.move(col.doc(f.id), kind: 'machineFault', title: '${f.code} · ${f.machineName} · ${f.desc}', subs: const ['photos']);
+    if (m != null && m.faultId == f.id) {
+      await MachineOps.col.doc(m.id).update({'faultId': '', 'faultStatus': '', 'faultAssignee': '', 'faultByUid': ''});
+    }
+  }
+
+  // 2. teknisyen (yardımcı) ekler / kaldırır
+  static Future<void> setHelper(MFault f, String uid, String name) async {
+    await col.doc(f.id).update({
+      'assignee2Uid': uid,
+      'assignee2Name': name,
+      'assignee2Open': uid,
+      'log': FieldValue.arrayUnion([_ev(uid.isEmpty ? '2. teknisyen kaldırıldı (${f.assignee2Name})' : '2. teknisyen: $name')]),
+    });
+    await _machineFields(f, {'faultAssignee': [f.assigneeName, name].where((x) => x.isNotEmpty).join(' + ')});
+  }
+
+  // Teknisyen yapamadığı arızayı başka teknisyene devreder
+  static Future<void> transfer(MFault f, String uid, String name, String note) async {
+    final helper = f.assignee2Uid == uid;
+    await col.doc(f.id).update({
+      'assigneeUid': uid,
+      'assigneeName': name,
+      'assigneeOpen': uid,
+      'assignedBy': currentUser?.name ?? '',
+      if (helper) ...{'assignee2Uid': '', 'assignee2Name': '', 'assignee2Open': ''},
+      'log': FieldValue.arrayUnion([_ev('Devredildi: ${f.assigneeName.isEmpty ? '-' : f.assigneeName} → $name${note.isEmpty ? '' : ' · $note'}')]),
+    });
+    await _machineFields(f, {'faultAssignee': [name, helper ? '' : f.assignee2Name].where((x) => x.isNotEmpty).join(' + ')});
+  }
+
+  // Bekleyen parça / araştırma süresini toplama ekler
+  static Map<String, dynamic> _closeHold(MFault f, DateTime now) {
+    if (!f.onHold || f.holdAt == null) return {};
+    final sec = now.difference(f.holdAt!).inSeconds;
+    if (sec <= 0) return {'holdAt': null};
+    return {f.status == 'parca' ? 'partSec' : 'researchSec': FieldValue.increment(sec), 'holdAt': null};
+  }
+
+  // Parça bekliyor / Arıza araştırılıyor (arıza açık kalır, süre ayrı sayılır)
+  static Future<void> hold(MFault f, String kind, String note) async {
+    final now = DateTime.now();
+    await col.doc(f.id).update({
+      ..._closeHold(f, now),
+      'status': kind,
+      'holdAt': Timestamp.fromDate(now),
+      'holdNote': note,
+      'log': FieldValue.arrayUnion([_ev('${kMFaultStatus[kind]}${note.isEmpty ? '' : ': $note'}')]),
+    });
+    await _machineFields(f, {'faultStatus': kind});
+  }
+
+  static Future<void> resume(MFault f) async {
+    final now = DateTime.now();
+    final what = f.status == 'parca' ? 'Parça geldi, müdahaleye devam' : 'Araştırma bitti, müdahaleye devam';
+    await col.doc(f.id).update({
+      ..._closeHold(f, now),
+      'status': 'basladi',
+      'holdNote': '',
+      'log': FieldValue.arrayUnion([_ev(what)]),
+    });
+    await _machineFields(f, {'faultStatus': 'basladi'});
   }
 
   // Müdür teknisyen atar (ya da kendisi üstlenir)
@@ -305,6 +534,7 @@ class MFaultOps {
     final m = await _machine(f.machineId);
     void writes(WriteBatch b) {
       b.update(col.doc(f.id), {
+        ..._closeHold(f, now),
         'status': 'onay',
         'doneAt': Timestamp.fromDate(now),
         'doneNote': note,
@@ -335,6 +565,7 @@ class MFaultOps {
         'approvedBy': currentUser?.name ?? '',
         'approvedByUid': currentUser?.uid ?? '',
         'assigneeOpen': '',
+        'assignee2Open': '',
         'awaitApproval': '',
         'log': FieldValue.arrayUnion([_ev('Onaylandı, arıza kapandı')]),
       });
@@ -469,7 +700,11 @@ Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, Str
                 ),
             ]),
             const SizedBox(height: 8),
-            const Text('Kaydedince makine arızalı olur, teknik hizmete alarm gider.', style: TextStyle(color: kMuted, fontSize: 12)),
+            Text(
+                faultNeedsMgr(currentUser, m.grp)
+                    ? 'Kaydedince makine arızalı olur; arıza önce panel yöneticisinin onayına gider, onaylanınca teknik hizmete alarm gider.'
+                    : 'Kaydedince makine arızalı olur, teknik hizmete alarm gider.',
+                style: const TextStyle(color: kMuted, fontSize: 12)),
           ]),
         ),
         actions: [
@@ -493,7 +728,7 @@ Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, Str
   try {
     toast('Arıza bildiriliyor…');
     await MFaultOps.report(m, r, desc.text.trim(), photos);
-    toast('${m.name}: arıza bildirildi, teknik hizmete alarm gitti');
+    toast(faultNeedsMgr(currentUser, m.grp) ? '${m.name}: arıza bildirildi, yönetici onayı bekleniyor' : '${m.name}: arıza bildirildi, teknik hizmete alarm gitti');
   } catch (e) {
     toast('Kaydedilemedi: $e');
   }
@@ -523,6 +758,95 @@ Future<void> rejectFaultFlow(BuildContext context, MFault f) async {
 }
 
 Future<void> assignFaultFlow(BuildContext context, MFault f) async {
+  final pick = await pickTechnician(context, 'Teknisyen seçin', allowSelf: true);
+  if (pick == null) return;
+  try {
+    await MFaultOps.assign(f, pick.uid, pick.name);
+    toast('Atandı: ${pick.name}');
+  } catch (e) {
+    toast('Kaydedilemedi: $e');
+  }
+}
+
+Future<void> helperFaultFlow(BuildContext context, MFault f) async {
+  final pick = await pickTechnician(context, '2. teknisyen (yardımcı) seçin', exclude: {f.assigneeUid});
+  if (pick == null) return;
+  try {
+    await MFaultOps.setHelper(f, pick.uid, pick.name);
+    toast('2. teknisyen: ${pick.name}');
+  } catch (e) {
+    toast('Kaydedilemedi: $e');
+  }
+}
+
+Future<void> transferFaultFlow(BuildContext context, MFault f) async {
+  final pick = await pickTechnician(context, 'Arızayı kime devrediyorsunuz?', exclude: {f.assigneeUid});
+  if (pick == null || !context.mounted) return;
+  final note = await askText(context, 'Devir nedeni', 'Neden devrediliyor? (isteğe bağlı)', ok: 'Devret');
+  if (note == null) return;
+  try {
+    await MFaultOps.transfer(f, pick.uid, pick.name, note.trim());
+    toast('Devredildi: ${pick.name}');
+  } catch (e) {
+    toast('Kaydedilemedi: $e');
+  }
+}
+
+Future<void> holdFaultFlow(BuildContext context, MFault f, String kind) async {
+  final t = await askText(context, kMFaultStatus[kind] ?? kind, kind == 'parca' ? 'Hangi parça bekleniyor?' : 'Ne araştırılıyor?', ok: 'Kaydet', mustFill: true);
+  if (t == null || t.trim().isEmpty) return;
+  try {
+    await MFaultOps.hold(f, kind, t.trim());
+    toast(kMFaultStatus[kind] ?? kind);
+  } catch (e) {
+    toast('Kaydedilemedi: $e');
+  }
+}
+
+Future<void> editFaultFlow(BuildContext context, MFault f) async {
+  final d = TextEditingController(text: f.hasPendingEdit ? (f.pendingEdit!['desc'] ?? f.desc).toString() : f.desc);
+  final n = TextEditingController(text: f.doneNote);
+  final direct = !faultNeedsMgr(currentUser, f.grp);
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: Text('Arızayı düzenle · ${f.machineName}'),
+      content: SingleChildScrollView(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: d, minLines: 2, maxLines: 5, decoration: const InputDecoration(labelText: 'Arıza açıklaması')),
+          if (direct && f.doneAt != null) TextField(controller: n, minLines: 1, maxLines: 4, decoration: const InputDecoration(labelText: 'Yapılan iş')),
+          const SizedBox(height: 8),
+          Text(direct ? 'Değişiklik hemen kaydedilir ve geçmişe yazılır.' : 'Değişiklik panel yöneticisinin onayına gider; onaylanınca geçerli olur.',
+              style: const TextStyle(color: kMuted, fontSize: 12)),
+        ]),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Vazgeç')),
+        FilledButton(onPressed: () => Navigator.pop(c, true), child: Text(direct ? 'Kaydet' : 'Onaya gönder')),
+      ],
+    ),
+  );
+  if (ok != true || d.text.trim().isEmpty) return;
+  try {
+    final done = await MFaultOps.edit(f, d.text.trim(), direct ? n.text.trim() : f.doneNote);
+    toast(done ? 'Kaydedildi' : 'Düzenleme yöneticinin onayına gönderildi');
+  } catch (e) {
+    toast('Kaydedilemedi: $e');
+  }
+}
+
+Future<void> deleteFaultFlow(BuildContext context, MFault f) async {
+  if (!await confirm(context, 'Arıza kaydı silinsin mi?', '${f.code} · ${f.machineName}\n${f.desc}\n\nKayıt 30 gün "Silinenler"de bekler, oradan geri getirilebilir.', 'Sil')) return;
+  try {
+    await MFaultOps.remove(f);
+    toast('Arıza kaydı silindi');
+    if (context.mounted) Navigator.of(context).maybePop();
+  } catch (e) {
+    toast('Silinemedi: $e');
+  }
+}
+
+Future<AppUser?> pickTechnician(BuildContext context, String title, {bool allowSelf = false, Set<String> exclude = const {}}) async {
   List<AppUser> techs;
   try {
     final s = await db.collection('users').get();
@@ -530,24 +854,24 @@ Future<void> assignFaultFlow(BuildContext context, MFault f) async {
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
   } catch (e) {
     toast('Kullanıcılar okunamadı: $e');
-    return;
+    return null;
   }
-  if (!context.mounted) return;
-  final pick = await showModalBottomSheet<AppUser>(
+  if (!context.mounted) return null;
+  return showModalBottomSheet<AppUser>(
     context: context,
     isScrollControlled: true,
     builder: (c) => SafeArea(
       child: ConstrainedBox(
         constraints: BoxConstraints(maxHeight: MediaQuery.of(c).size.height * 0.7),
         child: ListView(shrinkWrap: true, children: [
-          const ListTile(title: Text('Teknisyen seçin', style: TextStyle(fontWeight: FontWeight.w700))),
-          if (currentUser != null)
+          ListTile(title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700))),
+          if (allowSelf && currentUser != null)
             ListTile(
               leading: const Icon(Icons.person_pin),
               title: const Text('Kendim üstleniyorum'),
               onTap: () => Navigator.pop(c, currentUser),
             ),
-          for (final u in techs.where((u) => u.uid != currentUser?.uid))
+          for (final u in techs.where((u) => (!allowSelf || u.uid != currentUser?.uid) && !exclude.contains(u.uid)))
             ListTile(
               leading: Icon(Icons.circle, size: 12, color: u.isOnline ? const Color(0xFF2F9E44) : const Color(0xFFADB5BD)),
               title: Text(u.name),
@@ -563,13 +887,6 @@ Future<void> assignFaultFlow(BuildContext context, MFault f) async {
       ),
     ),
   );
-  if (pick == null) return;
-  try {
-    await MFaultOps.assign(f, pick.uid, pick.name);
-    toast('Atandı: ${pick.name}');
-  } catch (e) {
-    toast('Kaydedilemedi: $e');
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -602,12 +919,17 @@ class MFaultDetailPage extends StatelessWidget {
           final me = currentUser;
           final c = mFaultColor(f.status);
           final mine = me != null && f.assigneeUid == me.uid;
+          final mine2 = me != null && f.assignee2Uid.isNotEmpty && f.assignee2Uid == me.uid;
           final work = canTechWork(me);
           final manage = canTechManage(me);
-          final canStart = work && (f.status == 'acik' || f.status == 'atandi') && (f.assigneeUid.isEmpty || mine || manage);
-          final canFinish = f.status == 'basladi' && (mine || manage);
+          final pendingMgr = f.status == 'yonay';
+          final mgr = canMgrApprove(me, f);
+          final canStart = !pendingMgr && work && (f.status == 'acik' || f.status == 'atandi') && (f.assigneeUid.isEmpty || mine || mine2 || manage);
+          final canFinish = f.working && (mine || mine2 || manage);
           final canApprove = f.status == 'onay' && canApproveFault(me, f.grp, f.reportedByUid);
           final canComment = work || (me != null && (me.uid == f.reportedByUid || canMachineEnter(me, f.grp)));
+          final canEdit = f.open && me != null && (me.isAdmin || mgr || me.uid == f.reportedByUid || canMachineEnter(me, f.grp));
+          final canHelp = f.open && !pendingMgr && f.assigneeUid.isNotEmpty && (manage || mine);
           return ListView(padding: const EdgeInsets.all(16), children: [
             Row(children: [
               Expanded(child: Text('${f.machineName}${f.line.isEmpty ? '' : ' · ${f.line}'}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700))),
@@ -625,24 +947,127 @@ class MFaultDetailPage extends StatelessWidget {
               _row('Bildiren', '${f.reportedBy} · ${fmtFull(f.createdAt)}'),
               if (f.orderNo.isNotEmpty) _row('Sipariş', '${f.orderNo} · ${f.productCode}'),
               _row('Teknisyen', f.assigneeName.isEmpty ? 'Atanmadı' : '${f.assigneeName}${f.assignedBy.isEmpty ? '' : ' (atayan: ${f.assignedBy})'}'),
+              if (f.assignee2Name.isNotEmpty) _row('2. teknisyen', f.assignee2Name),
+              if (f.assignedAt != null) _row('Atama', fmtFull(f.assignedAt)),
               if (f.startedAt != null) _row('Başlama', fmtFull(f.startedAt)),
+              if (f.onHold) _row(f.status == 'parca' ? 'Parça bekleniyor' : 'Araştırılıyor', '${f.holdNote} · ${fmtSec(f.holdRunning)}'),
+              if (f.cancelled) _row('Reddedildi', '${f.approvedBy} · ${f.cancelNote}'),
               if (f.doneAt != null) _row('Bitti', '${fmtFull(f.doneAt)}${f.doneNote.isEmpty ? '' : ' · ${f.doneNote}'}'),
               if (f.approvedAt != null) _row('Onay', '${fmtFull(f.approvedAt)} · ${f.approvedBy}'),
               if (f.rejectCount > 0) _row('Giderilmedi', '${f.rejectCount} kez geri gönderildi'),
               const Divider(height: 16),
               _row('Atama bekleme', fmtSec(f.waitSec)),
+              if (f.startedAt != null) _row('Varış süresi', '${fmtSec(f.arriveSec)} (atamadan arızaya gidişe)'),
               _row('Onarım', fmtSec(f.repairSec)),
+              if (f.partNow > 0) _row('Parça bekleme', fmtSec(f.partNow)),
+              if (f.researchNow > 0) _row('Araştırma', fmtSec(f.researchNow)),
               if (f.doneAt != null || f.approvedAt != null) _row('Onay bekleme', fmtSec(f.approvalSec)),
               _row('Toplam duruş', '${fmtSec(f.totalSec)}${f.open ? ' (devam ediyor)' : ''}'),
             ])),
             const SizedBox(height: 10),
+            if (pendingMgr)
+              Container(
+                padding: const EdgeInsets.all(10),
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(color: const Color(0xFFF8F0FC), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFFE5DBFF))),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  const Text('Bu arıza panel yöneticisinin onayını bekliyor. Onaylanınca teknik hizmete alarm gider.',
+                      style: TextStyle(color: Color(0xFF862E9C), fontWeight: FontWeight.w600)),
+                  if (mgr) ...[
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          style: FilledButton.styleFrom(backgroundColor: kGreen, minimumSize: const Size.fromHeight(46)),
+                          onPressed: () async {
+                            try {
+                              await MFaultOps.mgrApprove(f);
+                              toast('Onaylandı, teknik hizmete gönderildi');
+                            } catch (e) {
+                              toast('Kaydedilemedi: $e');
+                            }
+                          },
+                          icon: const Icon(Icons.verified),
+                          label: const Text('Arızayı onayla'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFC92A2A), minimumSize: const Size.fromHeight(46)),
+                          onPressed: () async {
+                            final t = await askText(context, 'Arıza reddedilsin mi?', 'Neden? (makine "Çalışıyor" olur)', ok: 'Reddet', mustFill: true);
+                            if (t == null || t.trim().isEmpty) return;
+                            try {
+                              await MFaultOps.mgrReject(f, t.trim());
+                              toast('Reddedildi');
+                            } catch (e) {
+                              toast('Kaydedilemedi: $e');
+                            }
+                          },
+                          icon: const Icon(Icons.block),
+                          label: const Text('Reddet'),
+                        ),
+                      ),
+                    ]),
+                  ],
+                ]),
+              ),
+            if (f.hasPendingEdit)
+              Container(
+                padding: const EdgeInsets.all(10),
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(color: const Color(0xFFFFF9DB), borderRadius: BorderRadius.circular(10), border: Border.all(color: const Color(0xFFFFE066))),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Text('Düzenleme onay bekliyor (${f.pendingEdit!['by'] ?? ''}): "${f.pendingEdit!['desc'] ?? ''}"', style: const TextStyle(fontWeight: FontWeight.w600)),
+                  if (mgr) ...[
+                    const SizedBox(height: 8),
+                    Row(children: [
+                      Expanded(
+                        child: FilledButton(
+                          style: FilledButton.styleFrom(backgroundColor: kGreen),
+                          onPressed: () => MFaultOps.mgrEditDecision(f, true).then((_) => toast('Düzenleme onaylandı')).catchError((e) => toast('Kaydedilemedi: $e')),
+                          child: const Text('Düzenlemeyi onayla'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => MFaultOps.mgrEditDecision(f, false).then((_) => toast('Düzenleme reddedildi')).catchError((e) => toast('Kaydedilemedi: $e')),
+                          child: const Text('Reddet'),
+                        ),
+                      ),
+                    ]),
+                  ],
+                ]),
+              ),
             if (f.open) ...[
-              if (manage)
+              if (manage && !pendingMgr)
                 OutlinedButton.icon(
                   onPressed: () => assignFaultFlow(context, f),
                   icon: const Icon(Icons.person_add_alt),
                   label: Text(f.assigneeUid.isEmpty ? 'Teknisyen ata' : 'Teknisyeni değiştir'),
                 ),
+              if (canHelp)
+                Row(children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => f.assignee2Uid.isEmpty
+                          ? helperFaultFlow(context, f)
+                          : MFaultOps.setHelper(f, '', '').then((_) => toast('2. teknisyen kaldırıldı')).catchError((e) => toast('Kaydedilemedi: $e')),
+                      icon: Icon(f.assignee2Uid.isEmpty ? Icons.group_add_outlined : Icons.person_remove_outlined),
+                      label: Text(f.assignee2Uid.isEmpty ? '2. teknisyen ekle' : '2. teknisyeni kaldır'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => transferFaultFlow(context, f),
+                      icon: const Icon(Icons.swap_horiz),
+                      label: const Text('Başkasına devret'),
+                    ),
+                  ),
+                ]),
               if (canStart)
                 FilledButton.icon(
                   style: FilledButton.styleFrom(backgroundColor: const Color(0xFF1D4ED8), minimumSize: const Size.fromHeight(48)),
@@ -656,6 +1081,38 @@ class MFaultDetailPage extends StatelessWidget {
                   },
                   icon: const Icon(Icons.play_arrow),
                   label: const Text('Başladım'),
+                ),
+              if (canFinish && f.onHold)
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(backgroundColor: const Color(0xFF1D4ED8), minimumSize: const Size.fromHeight(48)),
+                  onPressed: () => MFaultOps.resume(f).then((_) => toast('Müdahaleye devam')).catchError((e) => toast('Kaydedilemedi: $e')),
+                  icon: const Icon(Icons.play_arrow),
+                  label: Text(f.status == 'parca' ? 'Parça geldi, devam et' : 'Araştırma bitti, devam et'),
+                ),
+              if (canFinish)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(children: [
+                    if (f.status != 'parca')
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFE67700)),
+                          onPressed: () => holdFaultFlow(context, f, 'parca'),
+                          icon: const Icon(Icons.inventory_2_outlined),
+                          label: const Text('Parça bekliyor'),
+                        ),
+                      ),
+                    if (f.status != 'parca' && f.status != 'arastir') const SizedBox(width: 8),
+                    if (f.status != 'arastir')
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFF0B7285)),
+                          onPressed: () => holdFaultFlow(context, f, 'arastir'),
+                          icon: const Icon(Icons.manage_search),
+                          label: const Text('Arıza araştırılıyor'),
+                        ),
+                      ),
+                  ]),
                 ),
               if (canFinish)
                 FilledButton.icon(
@@ -737,6 +1194,30 @@ class MFaultDetailPage extends StatelessWidget {
                   ),
                 ),
             ]),
+            if (canEdit || (me?.isAdmin ?? false))
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(children: [
+                  if (canEdit)
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () => editFaultFlow(context, f),
+                        icon: const Icon(Icons.edit_outlined),
+                        label: const Text('Düzenle'),
+                      ),
+                    ),
+                  if (canEdit && (me?.isAdmin ?? false)) const SizedBox(width: 8),
+                  if (me?.isAdmin ?? false)
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFC92A2A)),
+                        onPressed: () => deleteFaultFlow(context, f),
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Sil (admin)'),
+                      ),
+                    ),
+                ]),
+              ),
             if (f.photoCount > 0) ...[
               const SizedBox(height: 12),
               MFaultPhotos(key: ValueKey('ph-${f.id}-${f.photoCount}'), faultId: f.id),
@@ -906,7 +1387,7 @@ class _MFaultListState extends State<MFaultList> {
                       const SizedBox(height: 4),
                       Text(
                         '${f.code}${widget.group == null ? ' · ${f.grp.title}' : ''} · ${f.reportedBy} · ${fmtDT(f.createdAt)}'
-                        '${f.assigneeName.isEmpty ? '' : ' · Teknisyen: ${f.assigneeName}'}',
+                        '${f.techText.isEmpty ? '' : ' · Teknisyen: ${f.techText}'}${f.startedAt != null && f.assignedAt != null ? ' · varış ${fmtSec(f.arriveSec)}' : ''}',
                         style: const TextStyle(color: kMuted, fontSize: 12),
                       ),
                       Text(f.open ? 'Duruş: ${fmtSec(f.totalSec)} (devam ediyor)' : 'Toplam duruş: ${fmtSec(f.totalSec)} · onarım ${fmtSec(f.repairSec)}',
@@ -961,7 +1442,7 @@ class TechHome extends StatelessWidget {
 List<String> kFaultExcelHead(String lineLabel) => [
       'Kod', 'Panel', 'Makine', lineLabel, 'Sipariş no', 'Ürün kodu', 'Arıza açıklaması', 'Bildiren', 'Bildirim', 'Durum', 'Teknisyen', 'Atayan',
       'Atama', 'Başlama', 'Bitiş', 'Onay', 'Onaylayan', 'Atama bekleme (dk)', 'Onarım (dk)', 'Onay bekleme (dk)', 'Toplam duruş (dk)',
-      'Giderilmedi (kez)', 'Yapılan iş', 'Yorumlar',
+      'Giderilmedi (kez)', 'Yapılan iş', 'Yorumlar', '2. teknisyen', 'Varış süresi (dk)', 'Parça bekleme (dk)', 'Araştırma (dk)', 'Red nedeni',
     ];
 
 List<xl.CellValue?> faultExcelRow(MFault f) {
@@ -973,6 +1454,7 @@ List<xl.CellValue?> faultExcelRow(MFault f) {
     t(f.code), t(f.grp.title), t(f.machineName), t(f.line), t(f.orderNo), t(f.productCode), t(f.desc), t(f.reportedBy), t(dt(f.createdAt)),
     t(f.statusLabel), t(f.assigneeName), t(f.assignedBy), t(dt(f.assignedAt)), t(dt(f.startedAt)), t(dt(f.doneAt)), t(dt(f.approvedAt)),
     t(f.approvedBy), n(mins(f.waitSec)), n(mins(f.repairSec)), n(mins(f.approvalSec)), n(mins(f.totalSec)), n(f.rejectCount), t(f.doneNote), t(f.comments),
+    t(f.assignee2Name), n(mins(f.arriveSec)), n(mins(f.partNow)), n(mins(f.researchNow)), t(f.cancelNote),
   ];
 }
 
@@ -992,17 +1474,26 @@ Future<void> exportFaultsExcel(List<MFault> list, String title) async {
     }
     // Makine bazında özet
     final xl.Sheet sum = excel['Makine bazında'];
-    sum.appendRow(<xl.CellValue?>[for (final h in ['Panel', 'Makine', 'Hat / bölge', 'Arıza sayısı', 'Toplam duruş (dk)', 'Toplam onarım (dk)', 'Ort. duruş (dk)']) xl.TextCellValue(h)]);
+    sum.appendRow(<xl.CellValue?>[
+      for (final h in ['Panel', 'Makine', 'Hat / bölge', 'Arıza sayısı', 'Toplam duruş (dk)', 'Toplam onarım (dk)', 'Ort. duruş (dk)', 'Ort. varış (dk)', 'Parça bekleme (dk)', 'Araştırma (dk)'])
+        xl.TextCellValue(h)
+    ]);
     final by = <String, List<MFault>>{};
     for (final f in list) {
       by.putIfAbsent('${f.group}|${f.machineId}', () => <MFault>[]).add(f);
     }
-    for (final l in by.values) {
+    for (final l0 in by.values) {
+      final l = l0.where((f) => !f.cancelled).toList();
+      if (l.isEmpty) continue;
       final tot = l.fold<int>(0, (a, f) => a + f.totalSec);
       final rep = l.fold<int>(0, (a, f) => a + f.repairSec);
+      final arr = l.where((f) => f.startedAt != null && f.assignedAt != null).toList();
       sum.appendRow(<xl.CellValue?>[
         xl.TextCellValue(l.first.grp.title), xl.TextCellValue(l.first.machineName), xl.TextCellValue(l.first.line), xl.IntCellValue(l.length),
         xl.IntCellValue((tot / 60).round()), xl.IntCellValue((rep / 60).round()), xl.IntCellValue((tot / 60 / l.length).round()),
+        xl.IntCellValue(arr.isEmpty ? 0 : (arr.fold<int>(0, (a, f) => a + f.arriveSec) / 60 / arr.length).round()),
+        xl.IntCellValue((l.fold<int>(0, (a, f) => a + f.partNow) / 60).round()),
+        xl.IntCellValue((l.fold<int>(0, (a, f) => a + f.researchNow) / 60).round()),
       ]);
     }
     final bytes = excel.encode();

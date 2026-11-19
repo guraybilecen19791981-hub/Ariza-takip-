@@ -903,11 +903,12 @@ DateTime dayStart(DateTime d) => DateTime(d.year, d.month, d.day);
 bool canMachineEnter(AppUser? me, MGroup g) => me != null && me.can(g.perm, 'gir');
 bool canMachineManage(AppUser? me, MGroup g) => me != null && (me.isAdmin || me.can(g.perm, 'yonet'));
 
-// Kullanıcının görebileceği hatlar / bölgeler: null = tümü.
+// Kullanıcının görebileceği hatlar / bölgeler: null = tümü (Girer ve Yönetir aynı kural).
 // Kullanıcıya bu paneldeki hat / bölgelerden hiçbiri atanmamışsa paneldeki tüm makineleri görür.
 Set<String>? visibleLines(AppUser? me, MGroup g, Iterable<String> groupLines) {
   if (me == null) return <String>{};
-  if (me.isAdmin || me.can(g.perm, 'yonet') || me.lines.isEmpty) return null;
+  // Yönetir / Onay yetkisinde de yalnız atanan hat / bölgeler görünür (admin hepsini görür)
+  if (me.isAdmin || me.lines.isEmpty) return null;
   final gl = groupLines.toSet();
   final mine = me.lines.where(gl.contains).toSet();
   return mine.isEmpty ? null : mine;
@@ -1384,6 +1385,7 @@ bool liveFilterOk(String f, LineMachine m) {
 
 class _MachineLiveState extends State<MachineLive> {
   String _filter = 'tumu';
+  String _region = ''; // '' = tüm hat / bölgeler
   late final DateTime _from = dayStart(DateTime.now()).subtract(const Duration(days: 2));
   MGroup get g => widget.group;
   late final Stream<List<MLog>> _logs = MachineOps.logsSince(g, _from);
@@ -1447,7 +1449,6 @@ class _MachineLiveState extends State<MachineLive> {
                         final stats = computeMStats(machines, ls.data ?? const [], es.data ?? const [], [win]);
                         final running = machines.where((m) => m.running).length;
                         final off = machines.where((m) => m.off).length;
-                        String? lastLine;
                         final children = <Widget>[
                           Row(children: [
                             Expanded(child: _kpi('Çalışan', '$running', const Color(0xFF2B8A3E))),
@@ -1476,7 +1477,28 @@ class _MachineLiveState extends State<MachineLive> {
                           ]),
                           const SizedBox(height: 4),
                         ];
-                        final shown = machines.where((x) => liveFilterOk(_filter, x)).toList();
+                        final regions = machines.map((x) => x.line).toSet().toList()..sort();
+                        if (_region.isNotEmpty && !regions.contains(_region)) _region = '';
+                        if (regions.length > 1) {
+                          children.add(const SizedBox(height: 6));
+                          children.add(SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(children: [
+                              for (final r in ['', ...regions])
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 6),
+                                  child: ChoiceChip(
+                                    label: Text(r.isEmpty ? (g == kUretim ? 'Tüm bölgeler' : 'Tüm hatlar') : r),
+                                    selected: _region == r,
+                                    showCheckmark: false,
+                                    visualDensity: VisualDensity.compact,
+                                    onSelected: (_) => setState(() => _region = r),
+                                  ),
+                                ),
+                            ]),
+                          ));
+                        }
+                        final shown = machines.where((x) => liveFilterOk(_filter, x) && (_region.isEmpty || x.line == _region)).toList();
                         if (shown.isEmpty) {
                           children.add(Padding(
                             padding: const EdgeInsets.all(24),
@@ -1484,16 +1506,11 @@ class _MachineLiveState extends State<MachineLive> {
                                 textAlign: TextAlign.center, style: const TextStyle(color: kMuted, fontSize: 15)),
                           ));
                         }
+                        children.add(const SizedBox(height: 6));
+                        // Bölge adı kartın üstünde yazar; makineler bölge bölge ayrılmadan art arda dizilir
                         for (final m in shown) {
-                          if (m.line != lastLine) {
-                            lastLine = m.line;
-                            children.add(Padding(
-                              padding: const EdgeInsets.fromLTRB(2, 6, 0, 6),
-                              child: Text(m.line.isEmpty ? g.noLine : m.line, style: const TextStyle(fontWeight: FontWeight.w700, color: kMuted)),
-                            ));
-                          }
                           children.add(Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
+                            padding: const EdgeInsets.only(bottom: 8),
                             child: _MachineCard(m: m, stat: stats[m.id], reasons: reasons, shiftSec: shift.lenSec),
                           ));
                         }
@@ -1523,6 +1540,23 @@ class _MachineCard extends StatelessWidget {
   final int shiftSec;
   const _MachineCard({required this.m, required this.stat, required this.reasons, required this.shiftSec});
 
+  // Hızlı işlem: sipariş yoksa başlat, gün bittiyse güne başla, yoksa üretim / fire gir
+  Future<void> _main(BuildContext context) async {
+    if (!m.hasJob) return askStartJob(context, m);
+    if (m.jobStatus == 'gun_bitti') {
+      final v = await askPeople(context, m, 'Bugün kaç kişi çalışıyor?');
+      if (v == null) return;
+      try {
+        await MachineOps.startDay(m, v[0], v[1], v[2]);
+        toast('Güne başlandı');
+      } catch (e) {
+        toast('Kaydedilemedi: $e');
+      }
+      return;
+    }
+    return askProduction(context, m);
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = mStateColor(m.state);
@@ -1530,6 +1564,8 @@ class _MachineCard extends StatelessWidget {
     final enter = canMachineEnter(currentUser, m.grp);
     final tech = m.hasFault && canTechSee(currentUser);
     final te = st == null ? null : targetEff(m.target, m.targetUnit, st.tracked, shiftSec, st.qtyAdet, st.qtyKg);
+    final mainLabel = !m.hasJob ? 'Sipariş başlat' : (m.jobStatus == 'gun_bitti' ? 'Güne başla' : '+ Üretim');
+    final mainIcon = !m.hasJob || m.jobStatus == 'gun_bitti' ? Icons.play_arrow : null;
     return Card(
       margin: EdgeInsets.zero,
       color: m.off ? const Color(0xFFF8F9FA) : Colors.white,
@@ -1541,69 +1577,91 @@ class _MachineCard extends StatelessWidget {
             ? () => showMachineSheet(context, m, reasons)
             : (tech ? () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MFaultDetailPage(faultId: m.faultId))) : null),
         child: Padding(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              Expanded(child: Text(m.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700))),
-              if (!m.off && m.since != null) Elapsed(start: m.since!, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: c)),
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text((m.line.isEmpty ? m.grp.noLine : m.line).toUpperCase(),
+                      style: const TextStyle(fontSize: 11, color: kMuted, fontWeight: FontWeight.w700, letterSpacing: .3)),
+                  Text(m.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                ]),
+              ),
+              Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                if (!m.off && m.since != null) Elapsed(start: m.since!, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: c)),
+                if (te != null && te.expected > 0)
+                  Text('hedef %${te.pct.toStringAsFixed(0)}', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: effColor(te.pct)))
+                else if (m.hasTarget)
+                  const Text('hedef —', style: TextStyle(fontSize: 12, color: kMuted)),
+              ]),
             ]),
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
               decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(999)),
-              child: Text(m.stateLabel.toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+              child: Text(m.stateLabel.toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12)),
             ),
-            if (m.note.isNotEmpty && !m.off) Padding(padding: const EdgeInsets.only(top: 4), child: Text(m.note, style: const TextStyle(fontStyle: FontStyle.italic))),
+            if (m.note.isNotEmpty && !m.off) Padding(padding: const EdgeInsets.only(top: 3), child: Text(m.note, style: const TextStyle(fontStyle: FontStyle.italic, fontSize: 13))),
             if (m.hasFault)
               Container(
-                margin: const EdgeInsets.only(top: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                margin: const EdgeInsets.only(top: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(color: const Color(0xFFFFF5F5), borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xFFFFC9C9))),
                 child: Row(children: [
-                  const Icon(Icons.build_circle, color: Color(0xFFC92A2A), size: 18),
+                  const Icon(Icons.build_circle, color: Color(0xFFC92A2A), size: 16),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text('Arıza: ${kMFaultStatus[m.faultStatus] ?? m.faultStatus}${m.faultAssignee.isEmpty ? '' : ' · ${m.faultAssignee}'}',
-                        style: const TextStyle(color: Color(0xFFC92A2A), fontWeight: FontWeight.w700)),
+                        style: const TextStyle(color: Color(0xFFC92A2A), fontWeight: FontWeight.w700, fontSize: 13)),
                   ),
                 ]),
               ),
-            const SizedBox(height: 6),
-            if (m.hasJob) ...[
-              Text('Sipariş ${m.orderNo} · ${m.productCode}${m.jobStatus == 'gun_bitti' ? ' · gün bitti' : ''}',
-                  style: const TextStyle(fontWeight: FontWeight.w700)),
-              Text('${m.peopleText} · bu sipariş: ${m.jobQtyText}', style: const TextStyle(fontSize: 13)),
-              if (m.jobFireText.isNotEmpty)
-                Text('Fire: ${m.jobFireText}', style: const TextStyle(fontSize: 13, color: Color(0xFFC92A2A))),
-            ] else
-              const Text('Aktif sipariş yok', style: TextStyle(color: kMuted, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 5),
+            if (m.hasJob)
+              Text('${m.orderNo} · ${m.productCode} · ${m.peopleText} · ${m.jobQtyText}${m.jobStatus == 'gun_bitti' ? ' · gün bitti' : ''}',
+                  style: const TextStyle(fontSize: 13))
+            else
+              const Text('Aktif sipariş yok', style: TextStyle(color: kMuted, fontWeight: FontWeight.w600, fontSize: 13)),
+            if (m.hasJob && m.jobFireText.isNotEmpty) Text('Fire: ${m.jobFireText}', style: const TextStyle(fontSize: 12, color: Color(0xFFC92A2A))),
             if (!m.off || (st?.tracked ?? 0) > 0)
               Text(
-                'Bu vardiya: verim %${(st?.efficiency ?? 0).toStringAsFixed(0)} · çalışma ${fmtSec(st?.run ?? 0)} · duruş ${fmtSec(st?.stopTotal ?? 0)} · üretim ${st?.qtyText ?? '—'}${(st?.hasFire ?? false) ? ' · ${st!.fireTxt}' : ''}',
-                style: const TextStyle(color: kMuted, fontSize: 13),
+                'Bu vardiya: verim %${(st?.efficiency ?? 0).toStringAsFixed(0)} · çalışma ${fmtSec(st?.run ?? 0)} · duruş ${fmtSec(st?.stopTotal ?? 0)} · üretim ${st?.qtyText ?? '—'}'
+                '${te != null && te.expected > 0 ? ' · beklenen ${fmtQty(te.expected)} ${te.unitLabel}' : ''}',
+                style: const TextStyle(color: kMuted, fontSize: 12),
               ),
-            if (m.hasTarget)
-              Container(
-                margin: const EdgeInsets.only(top: 6, bottom: 2),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(color: const Color(0xFFF1F3F5), borderRadius: BorderRadius.circular(8)),
-                child: Row(children: [
-                  const Icon(Icons.flag_outlined, size: 18, color: kMuted),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      te == null || te.expected <= 0
-                          ? 'Hedef: ${m.targetText}'
-                          : 'Hedef ${m.targetText} · şu ana kadar ${fmtQty(te.done)} / ${fmtQty(te.expected)} ${te.unitLabel}',
-                      style: const TextStyle(fontSize: 13),
-                    ),
+            if (enter) ...[
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(backgroundColor: kOrange, minimumSize: const Size.fromHeight(42), padding: const EdgeInsets.symmetric(horizontal: 6)),
+                    onPressed: () => _main(context),
+                    child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      if (mainIcon != null) Icon(mainIcon, size: 18),
+                      Flexible(child: Text(mainLabel, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700))),
+                    ]),
                   ),
-                  if (te != null && te.expected > 0)
-                    Text('%${te.pct.toStringAsFixed(0)}', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: effColor(te.pct))),
-                ]),
-              ),
-            Text(m.off ? 'Kapalı · ${fmtDT(m.since)}' : '${m.by.isEmpty ? '' : '${m.by} · '}${fmtDT(m.since)}${enter ? ' · dokunun' : ''}',
-                style: const TextStyle(color: kMuted, fontSize: 12)),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(42), padding: const EdgeInsets.symmetric(horizontal: 6)),
+                    onPressed: () => showMachineSheet(context, m, reasons),
+                    child: const Text('Durum ▾', maxLines: 1, style: TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(42), padding: const EdgeInsets.symmetric(horizontal: 6)),
+                    onPressed: () => addNoteDialog(context, NoteRef.machine(m)),
+                    icon: const Icon(Icons.sticky_note_2_outlined, size: 18),
+                    label: const Text('Not', maxLines: 1, style: TextStyle(fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ]),
+            ] else
+              Text(m.off ? 'Kapalı · ${fmtDT(m.since)}' : '${m.by.isEmpty ? '' : '${m.by} · '}${fmtDT(m.since)}', style: const TextStyle(color: kMuted, fontSize: 12)),
           ]),
         ),
       ),
@@ -2750,7 +2808,7 @@ class MachineSettingsPage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(title: Text('${group.title} · ayarlar')),
       body: StreamBuilder<List<LineMachine>>(
-        stream: MachineOps.machinesStream(group, all: true),
+        stream: MachineOps.machinesStream(group), // yönetici de yalnız atanan hat / bölgeleri görür
         builder: (context, ms) {
           final machines = ms.data ?? const <LineMachine>[];
           final lines = machines.map((m) => m.line).toSet().toList()..sort();
