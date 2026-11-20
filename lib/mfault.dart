@@ -159,7 +159,7 @@ class MFault {
     return MFault(
       id: d.id,
       code: s('code'),
-      group: s('group'),
+      group: (m['tesis'] == true || (gMachineById[s('machineId')]?.tesis ?? false)) ? 'tesis' : s('group'),
       machineId: s('machineId'),
       machineName: s('machineName'),
       line: s('line'),

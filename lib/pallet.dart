@@ -68,6 +68,7 @@ class PalletOrder {
   final int photoCount;
   final int nextNo;
   final Map<String, int> packedByProduct;
+  final int palletShipped; // siparişten önce ayrı sevk edilen palet sayısı
 
   PalletOrder({
     required this.id,
@@ -89,6 +90,7 @@ class PalletOrder {
     required this.photoCount,
     required this.nextNo,
     required this.packedByProduct,
+    this.palletShipped = 0,
   });
 
   factory PalletOrder.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -116,13 +118,16 @@ class PalletOrder {
       photoCount: _toInt(m['photoCount']),
       nextNo: math.max(1, _toInt(m['nextNo'])),
       packedByProduct: pb,
+      palletShipped: _toInt(m['palletShipped']),
     );
   }
 
   bool get isFinished => status == 'bitti';
   bool get isShipped => isFinished && shippedAt != null;
   bool get isReady => isFinished && shippedAt == null;
-  String get stateLabel => !isFinished ? 'Açık' : (isShipped ? 'Sevk edildi' : 'Sevke hazır');
+  bool get partShipped => !isShipped && palletShipped > 0;
+  String get partText => partShipped ? '$palletShipped/$palletCount palet ayrı sevk edildi' : '';
+  String get stateLabel => (!isFinished ? 'Açık' : (isShipped ? 'Sevk edildi' : 'Sevke hazır')) + (partShipped ? ' · $partText' : '');
   int get orderedBoxes => lines.fold(0, (a, l) => a + l.boxes);
 }
 
@@ -134,8 +139,10 @@ class Pallet {
   final double net;
   final List<PLine> items;
   final String by;
+  final DateTime? shippedAt; // yalnız siparişten ayrı giden paletlerde dolu
+  final String shippedBy;
 
-  Pallet({required this.id, required this.no, required this.size, required this.gross, required this.net, required this.items, required this.by});
+  Pallet({required this.id, required this.no, required this.size, required this.gross, required this.net, required this.items, required this.by, this.shippedAt, this.shippedBy = ''});
 
   factory Pallet.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
     final m = d.data() ?? <String, dynamic>{};
@@ -147,8 +154,14 @@ class Pallet {
       net: _toDouble(m['net']),
       items: _lines(m['items']),
       by: (m['by'] ?? '').toString(),
+      shippedAt: tsToDate(m['shippedAt']),
+      shippedBy: (m['shippedBy'] ?? '').toString(),
     );
   }
+
+  bool get shipped => shippedAt != null;
+  // Çeki listesindeki sevk tarihi: ayrı gittiyse kendi tarihi, değilse sipariş sevk edildiyse siparişin tarihi
+  DateTime? shipDate(PalletOrder o) => shippedAt ?? (o.isShipped ? o.shippedAt : null);
 
   int get boxes => items.fold(0, (a, l) => a + l.boxes);
   int get units => items.fold(0, (a, l) => a + l.units);
@@ -232,10 +245,11 @@ class PalletOps {
   static Future<void> recompute(String id) async {
     final s = await ref(id).collection('pallets').get();
     final pallets = s.docs.map((d) => Pallet.fromDoc(d)).toList();
-    int boxes = 0, units = 0;
+    int boxes = 0, units = 0, shippedN = 0;
     double gross = 0, net = 0;
     final byProduct = <String, int>{};
     for (final p in pallets) {
+      if (p.shipped) shippedN++;
       boxes += p.boxes;
       units += p.units;
       gross += p.gross;
@@ -251,8 +265,18 @@ class PalletOps {
       'gross': gross,
       'net': net,
       'packedByProduct': byProduct,
+      'palletShipped': shippedN,
       'updatedAt': FieldValue.serverTimestamp(),
     });
+  }
+
+  // Paleti siparişten ayrı sevk et (at = null: admin sevki geri alır)
+  static Future<void> shipPallet(PalletOrder o, Pallet p, DateTime? at) async {
+    await ref(o.id).collection('pallets').doc(p.id).update({
+      'shippedAt': at == null ? null : Timestamp.fromDate(at),
+      'shippedBy': at == null ? '' : (currentUser?.name ?? ''),
+    });
+    await recompute(o.id);
   }
 
   static Future<void> finish(PalletOrder o, String note) => ref(o.id)
@@ -1052,20 +1076,65 @@ class PalletDetailPage extends StatelessWidget {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: InkWell(
                           borderRadius: BorderRadius.circular(12),
-                          onTap: fix && !o.isFinished
+                          onTap: fix && !o.isFinished && !p.shipped
                               ? () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => PalletFormPage(order: o, existing: p)))
                               : null,
-                          child: _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Row(children: [
-                              Expanded(child: Text('Palet ${p.no}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
-                              Text(p.size, style: const TextStyle(color: kMuted)),
-                            ]),
-                            Text('Brüt ${fmtKg(p.gross)} kg · Net ${fmtKg(p.net)} kg · ${p.boxes} koli (palet ağırlığı hariç)', style: const TextStyle(color: kMuted, fontSize: 13)),
-                            for (final it in p.items)
-                              Text('• ${it.productCode}: ${it.boxes} koli${it.perBox > 0 ? ' × ${it.perBox} = ${it.units} adet' : ''}'
-                                  '${it.lot.isNotEmpty ? ' · Lot ${it.lot}' : ''}${it.skt.isNotEmpty ? ' · SKT ${it.skt}' : ''}'
-                                  '${it.hasKg ? ' · ${fmtKg(it.gross)}/${fmtKg(it.net)} kg' : ''}'),
-                          ])),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              // ayrı sevk edilen palet komple kırmızı
+                              color: p.shipped ? const Color(0xFFC92A2A) : Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: p.shipped ? const Color(0xFFC92A2A) : const Color(0xFFE3E6EA)),
+                            ),
+                            child: DefaultTextStyle.merge(
+                              style: TextStyle(color: p.shipped ? Colors.white : null),
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Row(children: [
+                                  Expanded(child: Text('Palet ${p.no}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
+                                  Text(p.size, style: TextStyle(color: p.shipped ? Colors.white70 : kMuted)),
+                                ]),
+                                if (p.shipped)
+                                  Text('AYRI SEVK EDİLDİ · ${fmtFull(p.shippedAt)}${p.shippedBy.isEmpty ? '' : ' · ${p.shippedBy}'}',
+                                      style: const TextStyle(fontWeight: FontWeight.w800, color: Colors.white)),
+                                Text('Brüt ${fmtKg(p.gross)} kg · Net ${fmtKg(p.net)} kg · ${p.boxes} koli (palet ağırlığı hariç)',
+                                    style: TextStyle(color: p.shipped ? Colors.white70 : kMuted, fontSize: 13)),
+                                for (final it in p.items)
+                                  Text('• ${it.productCode}: ${it.boxes} koli${it.perBox > 0 ? ' × ${it.perBox} = ${it.units} adet' : ''}'
+                                      '${it.lot.isNotEmpty ? ' · Lot ${it.lot}' : ''}${it.skt.isNotEmpty ? ' · SKT ${it.skt}' : ''}'
+                                      '${it.hasKg ? ' · ${fmtKg(it.gross)}/${fmtKg(it.net)} kg' : ''}'),
+                                if (!o.isShipped && ((edit && !p.shipped) || (fix && p.shipped)))
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: TextButton.icon(
+                                      style: TextButton.styleFrom(foregroundColor: p.shipped ? Colors.white : const Color(0xFFC92A2A)),
+                                      onPressed: () async {
+                                        if (p.shipped) {
+                                          if (!await confirm(context, 'Ayrı sevk geri alınsın mı?', 'Palet ${p.no} tekrar siparişle birlikte gidecek olarak görünür.', 'Geri al')) return;
+                                          try {
+                                            await PalletOps.shipPallet(o, p, null);
+                                          } catch (e) {
+                                            toast('Hata: $e');
+                                          }
+                                          return;
+                                        }
+                                        final at = await pickDateTime(context, DateTime.now(), 'Palet ${p.no} · ayrı sevk tarihi ve saati');
+                                        if (at == null) return;
+                                        try {
+                                          await PalletOps.shipPallet(o, p, at);
+                                          toast('Palet ${p.no} ayrı sevk edildi');
+                                        } catch (e) {
+                                          toast('Hata: $e');
+                                        }
+                                      },
+                                      icon: Icon(p.shipped ? Icons.undo : Icons.local_shipping_outlined, size: 18),
+                                      label: Text(p.shipped ? 'Ayrı sevki geri al' : 'Bu palet ayrı sevk edildi'),
+                                    ),
+                                  ),
+                              ]),
+                            ),
+                          ),
                         ),
                       ),
                   ]);
@@ -1238,7 +1307,7 @@ Future<void> exportShipments() async {
         for (var i = 0; i < p.items.length; i++) {
           final it = p.items[i];
           det.appendRow(<xl.CellValue?>[
-            t(o.stateLabel), t(o.orderNo), t(o.customer), t(o.isShipped ? fmtFull(o.shippedAt) : ''), n(p.no), t(i == 0 ? p.size : ''),
+            t(o.stateLabel), t(o.orderNo), t(o.customer), t(p.shipDate(o) == null ? '' : fmtFull(p.shipDate(o))), n(p.no), t(i == 0 ? p.size : ''),
             t(it.productCode), t(it.lot), t(it.skt), n(it.boxes), n(it.perBox), n(it.units),
             it.hasKg ? dbl(it.boxGross) : null, it.hasKg ? dbl(it.boxNet) : null,
             p.items.any((x) => x.hasKg) ? dbl(it.gross) : (i == 0 ? dbl(p.gross) : null),
@@ -1285,7 +1354,7 @@ Future<void> exportPackingList(PalletOrder o) async {
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
       t('Palet no'), t('Palet ebatı (cm)'), t('Ürün kodu'), t('Lot no'), t('SKT'), t('Koli'), t('Koli içi adet'), t('Toplam adet'),
-      t('1 koli brüt kg'), t('1 koli net kg'), t('Brüt kg'), t('Net kg'),
+      t('1 koli brüt kg'), t('1 koli net kg'), t('Brüt kg'), t('Net kg'), t('Sevk tarihi'),
     ]);
     int tb = 0, tu = 0;
     double tg = 0, tn = 0;
@@ -1297,6 +1366,7 @@ Future<void> exportPackingList(PalletOrder o) async {
           n(p.no), t(i == 0 ? p.size : ''), t(it.productCode), t(it.lot), t(it.skt), n(it.boxes), n(it.perBox), n(it.units),
           it.hasKg ? dbl(it.boxGross) : null, it.hasKg ? dbl(it.boxNet) : null,
           legacy ? (i == 0 ? dbl(p.gross) : null) : dbl(it.gross), legacy ? (i == 0 ? dbl(p.net) : null) : dbl(it.net),
+          t(p.shipDate(o) == null ? '' : fmtFull(p.shipDate(o))),
         ]);
       }
       tb += p.boxes;
@@ -1307,6 +1377,9 @@ Future<void> exportPackingList(PalletOrder o) async {
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[t('TOPLAM'), t('${pallets.length} palet'), null, null, null, n(tb), null, n(tu), null, null, dbl(tg), dbl(tn)]);
     sh.appendRow(<xl.CellValue?>[t('Not: Brüt ve net ağırlıklara palet ağırlıkları dahil değildir.')]);
+    if (pallets.any((p) => p.shipped)) {
+      sh.appendRow(<xl.CellValue?>[t('Sevk tarihi: ayrı giden paletlerde kendi tarihi; diğerlerinde sipariş sevk edilince siparişin sevk tarihi yazar (sevk edilmediyse boş).')]);
+    }
 
     sum.appendRow(<xl.CellValue?>[t('Ürün kodu'), t('Sipariş koli'), t('Paletlenen koli'), t('Fark'), t('Koli içi adet'), t('Paletlenen adet')]);
     final byProduct = <String, int>{};

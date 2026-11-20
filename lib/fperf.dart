@@ -27,8 +27,8 @@ const Map<String, String> kPerfGroups = {'': 'Tümü', 'sargi': 'Sargı makinele
 
 bool perfGroupOk(String g, String group, bool tesis) {
   if (g.isEmpty) return true;
-  if (g == 'tesis') return tesis;
-  return !tesis && mGroupOf(group).key == g;
+  if (g == 'tesis') return tesis || group == 'tesis';
+  return !tesis && group != 'tesis' && mGroupOf(group).key == g;
 }
 
 class _Pct {

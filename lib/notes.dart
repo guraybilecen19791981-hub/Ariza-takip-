@@ -5,7 +5,7 @@ part of 'main.dart';
 // istenildiği kadar not eklenir. Notlar raporlarda ve Excel'de görünür.
 // ---------------------------------------------------------------------------
 
-const Map<String, String> kNoteModules = {'sargi': 'Sargı makineleri', 'uretim': 'Üretim makineleri', 'paketleme': 'Paketleme', 'paletleme': 'Paletleme'};
+const Map<String, String> kNoteModules = {'sargi': 'Sargı makineleri', 'uretim': 'Üretim makineleri', 'tesis': 'Tesis ekipmanları', 'paketleme': 'Paketleme', 'paletleme': 'Paletleme'};
 
 class NoteRef {
   final String module; // sargi | uretim | paketleme | paletleme

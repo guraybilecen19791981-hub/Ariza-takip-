@@ -87,8 +87,23 @@ const Map<String, String> kModules = {
   'paletleme': 'Paletleme',
   'hat': 'Sargı makineleri',
   'uretim': 'Üretim makineleri',
+  'tesis': 'Tesis ekipmanları',
   'teknik': 'Teknik hizmet',
   'rapor': 'Raporlar / Excel',
+};
+
+// Tesis ekipmanları varsayılan yetkileri (hat başlarındaki operatörler de arıza bildirebilsin)
+const Map<String, String> kTesisDefault = {
+  'admin': 'yonet',
+  'sef': 'yonet',
+  'teknisyen': 'gir',
+  'vardiya': 'yonet',
+  'paketci': 'gir',
+  'bildiren': 'gir',
+  'kalite': 'gor',
+  'ihracat': 'gor',
+  'planlama': 'gor',
+  'izleyen': 'gor',
 };
 
 // Teknik hizmet (makine arızaları) varsayılan yetkileri
@@ -238,7 +253,7 @@ Map<String, String> defaultPerms(String role) {
   final custom = gCustomRoles[role];
   if (custom != null) return Map<String, String>.from(custom.perms);
   Map<String, String> p(String a, String pk, String pl, String h, String r) =>
-      {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'uretim': h, 'teknik': kTechDefault[role] ?? 'yok', 'rapor': r};
+      {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'uretim': h, 'tesis': kTesisDefault[role] ?? 'yok', 'teknik': kTechDefault[role] ?? 'yok', 'rapor': r};
   switch (role) {
     case 'admin':
       return p('yonet', 'yonet', 'yonet', 'yonet', 'yonet');
@@ -720,7 +735,7 @@ class Watchers {
   static final Set<String> _seen = <String>{};
 
   static Future<void> ensure(AppUser u) async {
-    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}|${u.perm('teknik')}|${u.perm('hat')}|${u.perm('uretim')}|${u.lines.join(',')}';
+    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}|${u.perm('teknik')}|${u.perm('hat')}|${u.perm('uretim')}|${u.perm('tesis')}|${u.lines.join(',')}';
     if (key == _key) return;
     await stop();
     _key = key;
@@ -834,7 +849,7 @@ class Watchers {
       }, onError: (_) {});
     }
     // Panel yöneticisine: Girer yetkilinin açtığı arıza / düzenleme onay bekliyor
-    if (u.isAdmin || canMachineManage(u, kSargi) || canMachineManage(u, kUretim)) {
+    if (u.isAdmin || canMachineManage(u, kSargi) || canMachineManage(u, kUretim) || canMachineManage(u, kTesis)) {
       var first = true;
       try {
         final ms = await MachineOps.col.get();
@@ -873,7 +888,7 @@ class Watchers {
 
     if (kIsWeb) return; // web sürümünde arka plan servisi yok
     try {
-      final machineUser = u.can('hat', 'gir') || u.can('uretim', 'gir') || u.can('teknik', 'gir');
+      final machineUser = u.can('hat', 'gir') || u.can('uretim', 'gir') || u.can('tesis', 'gir') || u.can('teknik', 'gir');
       if (!u.machineAlarm && !u.getsPackAlerts && !machineUser && !(kArizaPanel && u.getsAlarm)) {
         await keepAlive.invokeMethod('stop');
       } else {
@@ -1406,6 +1421,14 @@ class _HomePageState extends State<HomePage> {
         modules.add('uretim');
       }
     }
+    if (me.can('tesis', 'gor')) {
+      final i = modules.lastIndexWhere((x) => x == 'uretim' || x == 'hat');
+      if (i >= 0) {
+        modules.insert(i + 1, 'tesis');
+      } else {
+        modules.add('tesis');
+      }
+    }
     // Teknik hizmet sekmesi (admin makine panellerindeki "Arızalar"dan ulaşır)
     if (!me.isAdmin && me.can('teknik', 'gor')) {
       if (me.role == 'teknisyen' || me.role == 'sef' || me.can('teknik', 'gir')) {
@@ -1440,6 +1463,7 @@ class _HomePageState extends State<HomePage> {
                     'paketleme': Icons.inventory_2_outlined,
                     'hat': Icons.precision_manufacturing_outlined,
                     'uretim': Icons.factory_outlined,
+                    'tesis': Icons.settings_input_component_outlined,
                     'teknik': Icons.build_circle_outlined,
                     'paletleme': Icons.layers_outlined,
                     'yonetim': Icons.manage_accounts_outlined,
@@ -1450,6 +1474,7 @@ class _HomePageState extends State<HomePage> {
                     'paketleme': 'Paketleme',
                     'hat': 'Sargı',
                     'uretim': 'Üretim',
+                    'tesis': 'Tesis',
                     'teknik': 'Arızalar',
                     'paletleme': 'Paletleme',
                     'yonetim': 'Yönetim',
@@ -1464,6 +1489,7 @@ class _HomePageState extends State<HomePage> {
     if (current == 'paletleme') return PalletHome(me: me, nav: nav);
     if (current == 'hat') return MachineHome(key: const ValueKey('mh-sargi'), me: me, nav: nav, group: kSargi);
     if (current == 'uretim') return MachineHome(key: const ValueKey('mh-uretim'), me: me, nav: nav, group: kUretim);
+    if (current == 'tesis') return MachineHome(key: const ValueKey('mh-tesis'), me: me, nav: nav, group: kTesis);
     if (current == 'yonetim') return _adminScaffold(context, me, nav);
     if (current == 'teknik') return TechHome(me: me, nav: nav);
     return _arizaScaffold(context, me, nav);
@@ -2674,7 +2700,7 @@ class UsersView extends StatelessWidget {
                         label: const Text('Şifre sıfırla'),
                       ),
                     ],
-                    if (u.role != 'admin' && u.role != 'bekliyor' && (u.can('hat', 'gor') || u.can('uretim', 'gor'))) ...[
+                    if (u.role != 'admin' && u.role != 'bekliyor' && (u.can('hat', 'gor') || u.can('uretim', 'gor') || u.can('tesis', 'gor'))) ...[
                       const SizedBox(height: 8),
                       OutlinedButton.icon(
                         onPressed: () => pickUserLines(context, u),
