@@ -172,7 +172,7 @@ class NotesPage extends StatelessWidget {
             separatorBuilder: (_, __) => const SizedBox(height: 8),
             itemBuilder: (context, i) {
               final n = list[i];
-              final canDel = me != null && (me.isAdmin || me.uid == n.byUid);
+              final canDel = canFixRecords(me); // not silme yalnız admin
               return GestureDetector(
                 onLongPress: canDel
                     ? () async {

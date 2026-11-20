@@ -24,6 +24,7 @@ part 'mfault.dart';
 part 'account.dart';
 part 'notes.dart';
 part 'trash.dart';
+part 'fperf.dart';
 
 // ---------------------------------------------------------------------------
 // Ayarlar
@@ -311,6 +312,9 @@ String fmtFull(DateTime? d) {
 String fmtMin(int m) => m >= 60 ? '${m ~/ 60} sa ${m % 60} dk' : '$m dk';
 
 DateTime? tsToDate(dynamic v) => v is Timestamp ? v.toDate() : null;
+
+// Mevcut kayıtları düzeltme ve silme yalnız admin'de (tüm paneller). Yeni giriş herkesin kendi yetkisiyle.
+bool canFixRecords([AppUser? u]) => (u ?? currentUser)?.isAdmin ?? false;
 
 Color statusBg(String s) {
   switch (s) {

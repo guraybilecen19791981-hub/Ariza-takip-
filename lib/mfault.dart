@@ -57,8 +57,9 @@ bool userSeesLine(AppUser? me, MGroup g, String line) {
   return vis == null || vis.contains(line);
 }
 
-// Arıza açma / düzenleme yöneticinin onayına düşer mi? (Girer / Düzenler yetkisi)
-bool faultNeedsMgr(AppUser? me, MGroup g) => me != null && !me.isAdmin && !canMachineManage(me, g) && !canTechManage(me);
+// Yönetici onayı kaldırıldı (v29): Girer / Düzenler yetkili arızayı doğrudan bildirir.
+// Önceden "Yönetici onayı bekliyor" olarak açılmış kayıtlar yönetici ekranından onaylanabilir / reddedilebilir.
+bool faultNeedsMgr(AppUser? me, MGroup g) => false;
 
 // Panel yöneticisi (Yönetir / Onay) ya da admin: Girer yetkilinin açtığı arızayı / düzenlemeyi onaylar
 bool canMgrApprove(AppUser? me, MFault f) => me != null && (me.isAdmin || (canMachineManage(me, f.grp) && userSeesLine(me, f.grp, f.line)));
@@ -100,6 +101,8 @@ class MFault {
   final int researchSec; // biten araştırma süreleri toplamı
   final Map<String, dynamic>? pendingEdit; // yönetici onayı bekleyen düzenleme
   final String cancelNote;
+  final bool noStop; // duruşsuz arıza: makine çalışmaya devam ediyor
+  final bool tesis; // tesis ekipmanı arızası (üretim dışı)
 
   MFault({
     required this.id,
@@ -138,6 +141,8 @@ class MFault {
     this.researchSec = 0,
     this.pendingEdit,
     this.cancelNote = '',
+    this.noStop = false,
+    this.tesis = false,
   });
 
   factory MFault.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -188,6 +193,8 @@ class MFault {
       researchSec: _int(m['researchSec']),
       pendingEdit: m['pendingEdit'] is Map ? Map<String, dynamic>.from(m['pendingEdit'] as Map) : null,
       cancelNote: s('cancelNote'),
+      noStop: m['noStop'] == true,
+      tesis: m['tesis'] == true || (gMachineById[s('machineId')]?.tesis ?? false),
     );
   }
 
@@ -219,8 +226,12 @@ class MFault {
   int get holdRunning => onHold ? _sec(holdAt, null) : 0;
   // Onay bekleme: "Bitti"den onaya
   int get approvalSec => doneAt == null ? 0 : _sec(doneAt, approvedAt);
-  // Toplam duruş: bildirimden onaya
+  // Toplam süre: bildirimden onaya
   int get totalSec => _sec(createdAt, approvedAt);
+  // Makinenin bu arıza yüzünden durduğu süre (duruşsuz arızada 0)
+  int get machineDownSec => noStop || cancelled ? 0 : totalSec;
+  // Teknisyen net onarım: parça bekleme düşülür (parça gecikmesi teknisyenin elinde değil)
+  int get netRepairSec => math.max(0, repairSec - partNow);
 
   String get comments =>
       log.where((e) => e['kind'] == 'yorum').map((e) => '${e['by'] ?? ''} (${fmtFull(tsToDate(e['t']))}): ${e['text'] ?? ''}').join(' | ');
@@ -252,19 +263,18 @@ class MFaultOps {
   }
 
   // Operatör arıza bildirir: makine arızalı olur, kayıt açılır, alarm gider
-  static Future<String> report(LineMachine m, MReason r, String desc, List<Uint8List> photos) async {
+  static Future<String> report(LineMachine m, MReason r, String desc, List<Uint8List> photos, {bool noStop = false}) async {
     final now = DateTime.now();
     final ref = col.doc();
     final uid = currentUser?.uid ?? '';
     final name = currentUser?.name ?? '';
     final mgr = faultNeedsMgr(currentUser, m.grp);
     final st0 = mgr ? 'yonay' : 'acik';
-    await MachineOps.setState(m, r.key, r.label, true, desc,
-        force: true,
-        fault: !mgr, // yönetici onayı gerekiyorsa teknik hizmete alarm onaydan sonra gider
-        extraMachine: {'faultId': ref.id, 'faultStatus': st0, 'faultAssignee': '', 'faultByUid': uid},
-        extraWrites: (b) {
+    final machineFields = <String, dynamic>{'faultId': ref.id, 'faultStatus': st0, 'faultAssignee': '', 'faultByUid': uid};
+    void writes(WriteBatch b) {
           b.set(ref, {
+            'noStop': noStop,
+            'tesis': m.tesis,
             'code': _code(now),
             'group': m.group,
             'machineId': m.id,
@@ -300,10 +310,33 @@ class MFaultOps {
             'assignee2Open': '',
             'partSec': 0,
             'researchSec': 0,
-            'log': [_ev('Arıza bildirildi: $desc${mgr ? ' (yönetici onayı bekleniyor)' : ''}')],
+            'log': [_ev('Arıza bildirildi: $desc${noStop ? ' (duruşsuz: makine çalışmaya devam ediyor)' : ''}${mgr ? ' (yönetici onayı bekleniyor)' : ''}')],
           });
-          b.set(MachineOps.entries.doc(), MachineOps._entryData(m, 'ariza', now, text: 'Arıza bildirildi: $desc'));
-        });
+          b.set(MachineOps.entries.doc(), MachineOps._entryData(m, 'ariza', now, text: 'Arıza bildirildi${noStop ? ' (duruşsuz)' : ''}: $desc'));
+    }
+
+    if (noStop) {
+      // Makinenin durumu değişmez; arıza kaydı açılır ve teknik hizmete alarm gider
+      final b = db.batch();
+      writes(b);
+      b.update(MachineOps.col.doc(m.id), machineFields);
+      b.set(db.collection('machineAlerts').doc(), {
+        'group': m.group,
+        'machineId': m.id,
+        'machineName': m.name,
+        'line': m.line,
+        'label': 'Duruşsuz arıza',
+        'note': desc,
+        'orderNo': m.orderNo,
+        'fault': true,
+        'by': name,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      await b.commit();
+    } else {
+      await MachineOps.setState(m, r.key, r.label, true, desc,
+          force: true, fault: !mgr, extraMachine: machineFields, extraWrites: writes);
+    }
     await _savePhotos(ref.id, photos, 0);
     return ref.id;
   }
@@ -385,7 +418,7 @@ class MFaultOps {
     }
 
     const clear = {'faultId': '', 'faultStatus': '', 'faultAssignee': '', 'faultByUid': ''};
-    if (m != null && m.faultId == f.id && !m.off) {
+    if (m != null && m.faultId == f.id && !m.off && !f.noStop) {
       await MachineOps.setState(m, kRunKey, 'Çalışıyor', false, 'Arıza reddedildi: $note',
           extraMachine: Map<String, dynamic>.from(clear), extraWrites: writes, force: true);
       return;
@@ -544,7 +577,7 @@ class MFaultOps {
       });
     }
 
-    if (m != null && m.faultId == f.id && !m.off) {
+    if (m != null && m.faultId == f.id && !m.off && !f.noStop) {
       await MachineOps.setState(m, kFaultWaitKey, kFaultWaitLabel, false, note, extraMachine: {'faultStatus': 'onay'}, extraWrites: writes, force: true);
       return;
     }
@@ -572,12 +605,13 @@ class MFaultOps {
     }
 
     const clear = {'faultId': '', 'faultStatus': '', 'faultAssignee': '', 'faultByUid': ''};
-    if (m != null && m.faultId == f.id) {
+    if (m != null && m.faultId == f.id && !f.noStop) {
       await MachineOps.setState(m, kRunKey, 'Çalışıyor', false, '', extraMachine: Map<String, dynamic>.from(clear), extraWrites: writes, force: true);
       return;
     }
     final b = db.batch();
     writes(b);
+    if (m != null && m.faultId == f.id) b.update(MachineOps.col.doc(m.id), Map<String, dynamic>.from(clear)); // duruşsuz: durum değişmez
     await b.commit();
   }
 
@@ -594,7 +628,7 @@ class MFaultOps {
       });
     }
 
-    if (m != null && m.faultId == f.id && !m.off) {
+    if (m != null && m.faultId == f.id && !m.off && !f.noStop) {
       await MachineOps.setState(m, f.reasonKey.isEmpty ? 'ariza' : f.reasonKey, f.reasonLabel.isEmpty ? 'Arızalı' : f.reasonLabel, false, 'Giderilmedi: $note',
           extraMachine: {'faultStatus': 'basladi'}, extraWrites: writes, force: true);
       return;
@@ -661,6 +695,7 @@ Future<Uint8List?> pickPhotoBytes(BuildContext context) async {
 Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, String note) async {
   final desc = TextEditingController(text: note);
   final photos = <Uint8List>[];
+  var noStop = false;
   final ok = await showDialog<bool>(
     context: context,
     builder: (d) => StatefulBuilder(
@@ -699,9 +734,17 @@ Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, Str
                   label: const Text('Fotoğraf'),
                 ),
             ]),
-            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: noStop,
+              onChanged: (v) => setS(() => noStop = v == true),
+              title: const Text('Makine çalışmaya devam ediyor (duruşsuz arıza)'),
+              subtitle: const Text('Makinenin durumu değişmez; arıza teknik hizmete gider ve onların performansına sayılır.', style: TextStyle(fontSize: 12)),
+            ),
             Text(
-                faultNeedsMgr(currentUser, m.grp)
+                noStop
+                    ? 'Kaydedince makine durumu değişmez; teknik hizmete alarm gider.'
+                    : faultNeedsMgr(currentUser, m.grp)
                     ? 'Kaydedince makine arızalı olur; arıza önce panel yöneticisinin onayına gider, onaylanınca teknik hizmete alarm gider.'
                     : 'Kaydedince makine arızalı olur, teknik hizmete alarm gider.',
                 style: const TextStyle(color: kMuted, fontSize: 12)),
@@ -727,7 +770,7 @@ Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, Str
   if (ok != true) return;
   try {
     toast('Arıza bildiriliyor…');
-    await MFaultOps.report(m, r, desc.text.trim(), photos);
+    await MFaultOps.report(m, r, desc.text.trim(), photos, noStop: noStop);
     toast(faultNeedsMgr(currentUser, m.grp) ? '${m.name}: arıza bildirildi, yönetici onayı bekleniyor' : '${m.name}: arıza bildirildi, teknik hizmete alarm gitti');
   } catch (e) {
     toast('Kaydedilemedi: $e');
@@ -928,7 +971,7 @@ class MFaultDetailPage extends StatelessWidget {
           final canFinish = f.working && (mine || mine2 || manage);
           final canApprove = f.status == 'onay' && canApproveFault(me, f.grp, f.reportedByUid);
           final canComment = work || (me != null && (me.uid == f.reportedByUid || canMachineEnter(me, f.grp)));
-          final canEdit = f.open && me != null && (me.isAdmin || mgr || me.uid == f.reportedByUid || canMachineEnter(me, f.grp));
+          final canEdit = canFixRecords(me); // arıza kaydını düzeltme yalnız admin
           final canHelp = f.open && !pendingMgr && f.assigneeUid.isNotEmpty && (manage || mine);
           return ListView(padding: const EdgeInsets.all(16), children: [
             Row(children: [
@@ -939,7 +982,8 @@ class MFaultDetailPage extends StatelessWidget {
                 child: Text(f.statusLabel, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12)),
               ),
             ]),
-            Text('${f.code} · ${f.grp.title}', style: const TextStyle(color: kMuted)),
+            Text('${f.code} · ${f.grp.title}${f.tesis ? ' · Tesis ekipmanı' : ''}${f.noStop ? ' · DURUŞSUZ (makine çalışıyor)' : ''}',
+                style: TextStyle(color: f.noStop ? const Color(0xFF1D4ED8) : kMuted, fontWeight: f.noStop ? FontWeight.w700 : FontWeight.w400)),
             const SizedBox(height: 10),
             _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(f.desc, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
@@ -962,7 +1006,7 @@ class MFaultDetailPage extends StatelessWidget {
               if (f.partNow > 0) _row('Parça bekleme', fmtSec(f.partNow)),
               if (f.researchNow > 0) _row('Araştırma', fmtSec(f.researchNow)),
               if (f.doneAt != null || f.approvedAt != null) _row('Onay bekleme', fmtSec(f.approvalSec)),
-              _row('Toplam duruş', '${fmtSec(f.totalSec)}${f.open ? ' (devam ediyor)' : ''}'),
+              _row(f.noStop ? 'Toplam süre' : 'Toplam duruş', '${fmtSec(f.totalSec)}${f.open ? ' (devam ediyor)' : ''}${f.noStop ? ' · makine durmadı' : ''}'),
             ])),
             const SizedBox(height: 10),
             if (pendingMgr)
@@ -1339,6 +1383,11 @@ class _MFaultListState extends State<MFaultList> {
                 onPressed: () => exportFaultsExcel(_last, widget.group?.title ?? 'Makine arızaları'),
                 icon: const Icon(Icons.download),
               ),
+              IconButton.filledTonal(
+                tooltip: 'Arıza ekibi performansı',
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => FaultPerfPage(group: widget.group))),
+                icon: const Icon(Icons.speed),
+              ),
             ]),
             const SizedBox(height: 8),
             SegmentedButton<int>(
@@ -1390,7 +1439,8 @@ class _MFaultListState extends State<MFaultList> {
                         '${f.techText.isEmpty ? '' : ' · Teknisyen: ${f.techText}'}${f.startedAt != null && f.assignedAt != null ? ' · varış ${fmtSec(f.arriveSec)}' : ''}',
                         style: const TextStyle(color: kMuted, fontSize: 12),
                       ),
-                      Text(f.open ? 'Duruş: ${fmtSec(f.totalSec)} (devam ediyor)' : 'Toplam duruş: ${fmtSec(f.totalSec)} · onarım ${fmtSec(f.repairSec)}',
+                      Text(
+                          '${f.noStop ? 'Duruşsuz · ' : ''}${f.open ? '${f.noStop ? 'Süre' : 'Duruş'}: ${fmtSec(f.totalSec)} (devam ediyor)' : '${f.noStop ? 'Toplam süre' : 'Toplam duruş'}: ${fmtSec(f.totalSec)} · onarım ${fmtSec(f.repairSec)}'}',
                           style: TextStyle(color: f.open ? const Color(0xFFC92A2A) : kMuted, fontSize: 12, fontWeight: FontWeight.w600)),
                     ]),
                   ),
@@ -1443,6 +1493,7 @@ List<String> kFaultExcelHead(String lineLabel) => [
       'Kod', 'Panel', 'Makine', lineLabel, 'Sipariş no', 'Ürün kodu', 'Arıza açıklaması', 'Bildiren', 'Bildirim', 'Durum', 'Teknisyen', 'Atayan',
       'Atama', 'Başlama', 'Bitiş', 'Onay', 'Onaylayan', 'Atama bekleme (dk)', 'Onarım (dk)', 'Onay bekleme (dk)', 'Toplam duruş (dk)',
       'Giderilmedi (kez)', 'Yapılan iş', 'Yorumlar', '2. teknisyen', 'Varış süresi (dk)', 'Parça bekleme (dk)', 'Araştırma (dk)', 'Red nedeni',
+      'Duruşsuz', 'Makine duruşu (dk)', 'Tesis ekipmanı',
     ];
 
 List<xl.CellValue?> faultExcelRow(MFault f) {
@@ -1455,6 +1506,7 @@ List<xl.CellValue?> faultExcelRow(MFault f) {
     t(f.statusLabel), t(f.assigneeName), t(f.assignedBy), t(dt(f.assignedAt)), t(dt(f.startedAt)), t(dt(f.doneAt)), t(dt(f.approvedAt)),
     t(f.approvedBy), n(mins(f.waitSec)), n(mins(f.repairSec)), n(mins(f.approvalSec)), n(mins(f.totalSec)), n(f.rejectCount), t(f.doneNote), t(f.comments),
     t(f.assignee2Name), n(mins(f.arriveSec)), n(mins(f.partNow)), n(mins(f.researchNow)), t(f.cancelNote),
+    t(f.noStop ? 'Evet' : ''), n(mins(f.machineDownSec)), t(f.tesis ? 'Evet' : ''),
   ];
 }
 
@@ -1485,7 +1537,7 @@ Future<void> exportFaultsExcel(List<MFault> list, String title) async {
     for (final l0 in by.values) {
       final l = l0.where((f) => !f.cancelled).toList();
       if (l.isEmpty) continue;
-      final tot = l.fold<int>(0, (a, f) => a + f.totalSec);
+      final tot = l.fold<int>(0, (a, f) => a + f.machineDownSec);
       final rep = l.fold<int>(0, (a, f) => a + f.repairSec);
       final arr = l.where((f) => f.startedAt != null && f.assignedAt != null).toList();
       sum.appendRow(<xl.CellValue?>[

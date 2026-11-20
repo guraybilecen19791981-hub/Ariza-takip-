@@ -246,6 +246,7 @@ class LineMachine {
   final String faultByUid; // arızayı açan (onay verecek kişi)
   final double target; // vardiya hedefi (0 = hedef yok)
   final String targetUnit; // adet | kg
+  final bool tesis; // tesis ekipmanı: üretime dahil değil (sipariş / üretim / hedef yok, sadece durum ve arıza)
 
   LineMachine({
     required this.id,
@@ -280,6 +281,7 @@ class LineMachine {
     this.faultByUid = '',
     this.target = 0,
     this.targetUnit = 'adet',
+    this.tesis = false,
   });
 
   factory LineMachine.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -317,11 +319,12 @@ class LineMachine {
       faultByUid: (m['faultByUid'] ?? '').toString(),
       target: _dbl(m['target']),
       targetUnit: m['targetUnit'] == 'kg' ? 'kg' : 'adet',
+      tesis: m['tesis'] == true,
     );
   }
 
   MGroup get grp => mGroupOf(group);
-  bool get hasTarget => target > 0;
+  bool get hasTarget => !tesis && target > 0;
   String get targetText => hasTarget ? '${fmtQty(target)} ${targetUnit == 'kg' ? 'kg' : 'adet'} / vardiya' : '';
   bool get hasFault => faultId.isNotEmpty;
   String get peopleText => grp.peopleText(workers, daily, operators);
@@ -985,8 +988,9 @@ class MachineOps {
     return s.docs.map((d) => MEntry.fromDoc(d)).where((e) => recOwns(g, e.machineId, e.group)).toList();
   }
 
-  static Future<void> addMachine(MGroup g, String name, String line, int order, [double target = 0, String targetUnit = 'adet']) => col.add({
-        'target': target,
+  static Future<void> addMachine(MGroup g, String name, String line, int order, [double target = 0, String targetUnit = 'adet', bool tesis = false]) => col.add({
+        'tesis': tesis,
+        'target': tesis ? 0 : target,
         'targetUnit': targetUnit,
         'group': g.key,
         'name': name,
@@ -1006,8 +1010,8 @@ class MachineOps {
         'createdAt': FieldValue.serverTimestamp(),
       });
 
-  static Future<void> editMachine(LineMachine m, String name, String line, int order, [double target = 0, String targetUnit = 'adet']) =>
-      col.doc(m.id).update({'name': name, 'line': line, 'order': order, 'target': target, 'targetUnit': targetUnit});
+  static Future<void> editMachine(LineMachine m, String name, String line, int order, [double target = 0, String targetUnit = 'adet', bool tesis = false]) =>
+      col.doc(m.id).update({'name': name, 'line': line, 'order': order, 'target': tesis ? 0 : target, 'targetUnit': targetUnit, 'tesis': tesis});
 
   static Future<void> deleteMachine(LineMachine m) => TrashOps.move(col.doc(m.id), kind: 'machine', title: '${m.grp.title} · ${m.name}');
 
@@ -1540,8 +1544,17 @@ class _MachineCard extends StatelessWidget {
   final int shiftSec;
   const _MachineCard({required this.m, required this.stat, required this.reasons, required this.shiftSec});
 
-  // Hızlı işlem: sipariş yoksa başlat, gün bittiyse güne başla, yoksa üretim / fire gir
+  // Hızlı işlem: sipariş yoksa başlat, gün bittiyse güne başla, yoksa üretim / fire gir.
+  // Tesis ekipmanında: arıza bildir (açık arıza varsa arıza detayı)
   Future<void> _main(BuildContext context) async {
+    if (m.tesis) {
+      if (m.hasFault) {
+        await Navigator.of(context).push(MaterialPageRoute(builder: (_) => MFaultDetailPage(faultId: m.faultId)));
+        return;
+      }
+      final r = reasons.where((x) => x.fault).firstOrNull ?? const MReason('ariza', 'Arızalı', true, true);
+      return reportFaultFlow(context, m, r, '');
+    }
     if (!m.hasJob) return askStartJob(context, m);
     if (m.jobStatus == 'gun_bitti') {
       final v = await askPeople(context, m, 'Bugün kaç kişi çalışıyor?');
@@ -1564,8 +1577,10 @@ class _MachineCard extends StatelessWidget {
     final enter = canMachineEnter(currentUser, m.grp);
     final tech = m.hasFault && canTechSee(currentUser);
     final te = st == null ? null : targetEff(m.target, m.targetUnit, st.tracked, shiftSec, st.qtyAdet, st.qtyKg);
-    final mainLabel = !m.hasJob ? 'Sipariş başlat' : (m.jobStatus == 'gun_bitti' ? 'Güne başla' : '+ Üretim');
-    final mainIcon = !m.hasJob || m.jobStatus == 'gun_bitti' ? Icons.play_arrow : null;
+    final mainLabel = m.tesis
+        ? (m.hasFault ? 'Arıza detayı' : 'Arıza bildir')
+        : (!m.hasJob ? 'Sipariş başlat' : (m.jobStatus == 'gun_bitti' ? 'Güne başla' : '+ Üretim'));
+    final mainIcon = m.tesis ? Icons.build_circle_outlined : (!m.hasJob || m.jobStatus == 'gun_bitti' ? Icons.play_arrow : null);
     return Card(
       margin: EdgeInsets.zero,
       color: m.off ? const Color(0xFFF8F9FA) : Colors.white,
@@ -1582,8 +1597,8 @@ class _MachineCard extends StatelessWidget {
             Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text((m.line.isEmpty ? m.grp.noLine : m.line).toUpperCase(),
-                      style: const TextStyle(fontSize: 11, color: kMuted, fontWeight: FontWeight.w700, letterSpacing: .3)),
+                  Text('${(m.line.isEmpty ? m.grp.noLine : m.line).toUpperCase()}${m.tesis ? ' · TESİS EKİPMANI' : ''}',
+                      style: TextStyle(fontSize: 11, color: m.tesis ? const Color(0xFF0B7285) : kMuted, fontWeight: FontWeight.w700, letterSpacing: .3)),
                   Text(m.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                 ]),
               ),
@@ -1617,13 +1632,15 @@ class _MachineCard extends StatelessWidget {
                 ]),
               ),
             const SizedBox(height: 5),
-            if (m.hasJob)
+            if (m.tesis)
+              const Text('Üretime dahil değil · durum ve arıza takibi', style: TextStyle(color: kMuted, fontSize: 12))
+            else if (m.hasJob)
               Text('${m.orderNo} · ${m.productCode} · ${m.peopleText} · ${m.jobQtyText}${m.jobStatus == 'gun_bitti' ? ' · gün bitti' : ''}',
                   style: const TextStyle(fontSize: 13))
             else
               const Text('Aktif sipariş yok', style: TextStyle(color: kMuted, fontWeight: FontWeight.w600, fontSize: 13)),
             if (m.hasJob && m.jobFireText.isNotEmpty) Text('Fire: ${m.jobFireText}', style: const TextStyle(fontSize: 12, color: Color(0xFFC92A2A))),
-            if (!m.off || (st?.tracked ?? 0) > 0)
+            if (!m.tesis && (!m.off || (st?.tracked ?? 0) > 0))
               Text(
                 'Bu vardiya: verim %${(st?.efficiency ?? 0).toStringAsFixed(0)} · çalışma ${fmtSec(st?.run ?? 0)} · duruş ${fmtSec(st?.stopTotal ?? 0)} · üretim ${st?.qtyText ?? '—'}'
                 '${te != null && te.expected > 0 ? ' · beklenen ${fmtQty(te.expected)} ${te.unitLabel}' : ''}',
@@ -1634,7 +1651,7 @@ class _MachineCard extends StatelessWidget {
               Row(children: [
                 Expanded(
                   child: FilledButton(
-                    style: FilledButton.styleFrom(backgroundColor: kOrange, minimumSize: const Size.fromHeight(42), padding: const EdgeInsets.symmetric(horizontal: 6)),
+                    style: FilledButton.styleFrom(backgroundColor: m.tesis ? const Color(0xFFC92A2A) : kOrange, minimumSize: const Size.fromHeight(42), padding: const EdgeInsets.symmetric(horizontal: 6)),
                     onPressed: () => _main(context),
                     child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
                       if (mainIcon != null) Icon(mainIcon, size: 18),
@@ -1718,6 +1735,7 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
                 ]),
               ),
             ],
+            if (!m.tesis) ...[
             const SizedBox(height: 12),
             const Text('Sipariş', style: TextStyle(fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
@@ -1743,6 +1761,7 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
               ]),
             if (m.hasJob)
               Row(children: [
+                if (canFixRecords())
                 Expanded(
                   child: TextButton.icon(
                       onPressed: () => Navigator.pop(c, 'duzenle'), icon: const Icon(Icons.edit, size: 18), label: const Text('Sipariş no / ürün kodu düzelt')),
@@ -1752,6 +1771,7 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
                       onPressed: () => Navigator.pop(c, 'gorsel'), icon: const Icon(Icons.photo_library_outlined, size: 18), label: const Text('Sipariş görselleri')),
                 ),
               ]),
+            ],
             const SizedBox(height: 6),
             OutlinedButton.icon(
               onPressed: () => Navigator.pop(c, 'notlar'),
@@ -1859,7 +1879,7 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
           'Evet, çalışıyor');
       if (!go) return;
     }
-    if (!m.hasJob && picked.key == kRunKey) toast('Not: aktif sipariş yok. Üretim takibi için "Yeni sipariş başlat" kullanın.');
+    if (!m.hasJob && !m.tesis && picked.key == kRunKey) toast('Not: aktif sipariş yok. Üretim takibi için "Yeni sipariş başlat" kullanın.');
     await run(() => MachineOps.setState(m, picked.key, picked.label, picked.alarm, note.text.trim()),
         '${m.name}: ${picked.label}${picked.alarm ? ' · alarm gönderildi' : ''}');
   }
@@ -2157,7 +2177,8 @@ class _MachineReportPageState extends State<MachineReportPage> {
     return m == null ? null : targetEff(m.target, m.targetUnit, s.tracked, _shift.lenSec, s.qtyAdet, s.qtyKg);
   }
 
-  List<LineMachine> get _visibleMachines => _machines.where((m) => _line.isEmpty || m.line == _line).toList();
+  bool _tesis = false; // false: üretim (sargı) makineleri, true: tesis ekipmanları
+  List<LineMachine> get _visibleMachines => _machines.where((m) => m.tesis == _tesis && (_line.isEmpty || m.line == _line)).toList();
 
   Future<void> _load() async {
     setState(() => _loading = true);
@@ -2273,6 +2294,17 @@ class _MachineReportPageState extends State<MachineReportPage> {
           const Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text('–')),
           Expanded(child: OutlinedButton.icon(onPressed: () => _pick(false), icon: const Icon(Icons.calendar_today, size: 18), label: Text(fmtDay(_to)))),
         ]),
+        if (_machines.any((m) => m.tesis)) ...[
+          const SizedBox(height: 10),
+          SegmentedButton<bool>(
+            segments: [
+              ButtonSegment<bool>(value: false, label: Text(g.title), icon: const Icon(Icons.precision_manufacturing_outlined, size: 18)),
+              const ButtonSegment<bool>(value: true, label: Text('Tesis ekipmanları'), icon: Icon(Icons.factory_outlined, size: 18)),
+            ],
+            selected: {_tesis},
+            onSelectionChanged: (v) => setState(() => _tesis = v.first),
+          ),
+        ],
         const SizedBox(height: 10),
         DropdownButtonFormField<int>(
           value: _shiftIdx,
@@ -2430,7 +2462,8 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     final teHead = [t('Hedef verimi %'), t('Vardiya hedefi'), t('Hedef birimi'), t('Beklenen üretim'), t('Gerçekleşen')];
     List<xl.CellValue?> teCells(TargetEff? x) =>
         x == null ? [null, null, null, null, null] : [dbl(x.pct), dbl(x.target), t(x.unitLabel), dbl(x.expected), dbl(x.done)];
-    sh.appendRow(<xl.CellValue?>[t('${g.title} raporu'), t('${fmtDay(wins.first.day)} – ${fmtDay(wins.last.day)}'), t('Vardiya: ${shift.label}')]);
+    final tesisRep = machines.isNotEmpty && machines.every((m) => m.tesis);
+    sh.appendRow(<xl.CellValue?>[t('${tesisRep ? 'Tesis ekipmanları (${g.title})' : g.title} raporu'), t('${fmtDay(wins.first.day)} – ${fmtDay(wins.last.day)}'), t('Vardiya: ${shift.label}')]);
     sh.appendRow(<xl.CellValue?>[]);
     sh.appendRow(<xl.CellValue?>[
       t('Makine'), t(hl), t('Verimlilik %'), ...teHead, t('Çalışılan süre (dk)'), t('Çalışma (dk)'), t('Toplam duruş (dk)'),
@@ -2591,7 +2624,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
       return;
     }
     final d0 = wins.first.day;
-    await shareBytes(bytes, '${g == kUretim ? 'uretim_makineleri' : 'sargi_makineleri'}_raporu_${d0.year}${two(d0.month)}${two(d0.day)}.xlsx', '${g.title} raporu');
+    await shareBytes(bytes, '${tesisRep ? 'tesis_' : ''}${g == kUretim ? 'uretim_makineleri' : 'sargi_makineleri'}_raporu_${d0.year}${two(d0.month)}${two(d0.day)}.xlsx', '${g.title} raporu');
   } catch (e) {
     toast('Excel hatası: $e');
   }
@@ -2612,6 +2645,7 @@ class MachineSettingsPage extends StatelessWidget {
     final order = TextEditingController(text: '${m?.order ?? nextOrder}');
     final target = TextEditingController(text: (m?.target ?? 0) > 0 ? fmtQty(m!.target).replaceAll('.', '') : '');
     var tUnit = m?.targetUnit ?? 'adet';
+    var tesis = m?.tesis ?? false;
     final ok = await showDialog<bool>(
       context: context,
       builder: (d) => StatefulBuilder(builder: (d, setS) => AlertDialog(
@@ -2629,7 +2663,16 @@ class MachineSettingsPage extends StatelessWidget {
               ]),
             const SizedBox(height: 10),
             TextField(controller: order, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Sıra')),
-            const SizedBox(height: 14),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: tesis,
+              onChanged: (v) => setS(() => tesis = v),
+              title: const Text('Tesis ekipmanı'),
+              subtitle: const Text('Üretime dahil değil (kompresör, chiller, konveyör vb.): sipariş, üretim ve hedef girilmez; sadece durum ve arıza takibi. '
+                  'Raporda "Tesis ekipmanları" seçilince ayrı görünür.', style: TextStyle(fontSize: 12)),
+            ),
+            if (!tesis) ...[
+            const SizedBox(height: 6),
             const Text('Üretim hedefi (vardiya başına)', style: TextStyle(fontWeight: FontWeight.w700)),
             Row(children: [
               Expanded(
@@ -2650,6 +2693,7 @@ class MachineSettingsPage extends StatelessWidget {
                 'Hedef bir vardiya${gShiftSec > 0 ? ' (${fmtSec(gShiftSec)})' : ''} için verilir. Hedef verimi = yapılan ÷ (hedef × çalışılan süre ÷ vardiya süresi). '
                 'Kapalı süre hedeften düşülür, duruşlar düşülmez.',
                 style: const TextStyle(color: kMuted, fontSize: 12)),
+            ],
           ]),
         ),
         actions: [
@@ -2663,9 +2707,9 @@ class MachineSettingsPage extends StatelessWidget {
       final o = int.tryParse(order.text.trim()) ?? nextOrder;
       final tg = double.tryParse(target.text.trim().replaceAll(' ', '').replaceAll(',', '.')) ?? 0;
       if (m == null) {
-        await MachineOps.addMachine(group, name.text.trim(), line.text.trim(), o, tg < 0 ? 0 : tg, tUnit);
+        await MachineOps.addMachine(group, name.text.trim(), line.text.trim(), o, tg < 0 ? 0 : tg, tUnit, tesis);
       } else {
-        await MachineOps.editMachine(m, name.text.trim(), line.text.trim(), o, tg < 0 ? 0 : tg, tUnit);
+        await MachineOps.editMachine(m, name.text.trim(), line.text.trim(), o, tg < 0 ? 0 : tg, tUnit, tesis);
       }
     } catch (e) {
       toast('Kaydedilemedi: $e');
@@ -2825,7 +2869,7 @@ class MachineSettingsPage extends StatelessWidget {
                     for (final m in machines)
                       _row(
                         title: Text(m.name),
-                        subtitle: '${m.line.isEmpty ? group.noLine : m.line} · sıra ${m.order}${m.hasTarget ? ' · hedef ${m.targetText}' : ''}',
+                        subtitle: '${m.line.isEmpty ? group.noLine : m.line} · sıra ${m.order}${m.tesis ? ' · TESİS EKİPMANI' : ''}${m.hasTarget ? ' · hedef ${m.targetText}' : ''}',
                         onEdit: () => _machineDialog(context, m, m.order, lines),
                         onDelete: () async {
                           if (!await confirm(context, 'Makine silinsin mi?', '${m.name} listeden kalkar. Geçmiş kayıtları raporlarda kalır.', 'Sil')) return;
@@ -3134,7 +3178,7 @@ Future<void> showJobDetail(BuildContext context, MJob j) async {
                     padding: const EdgeInsets.only(top: 3),
                     child: Row(children: [Expanded(child: Text(e.key)), Text(fmtSec(e.value), style: const TextStyle(fontWeight: FontWeight.w600))]),
                   ),
-                if (canMachineManage(currentUser, mGroupOf(j.group))) ...[
+                if (canFixRecords()) ...[
                   const SizedBox(height: 12),
                   if (j.finished)
                     OutlinedButton.icon(
@@ -3276,7 +3320,7 @@ class _JobPhotosPageState extends State<JobPhotosPage> {
   @override
   Widget build(BuildContext context) {
     final canAdd = canMachineEnter(currentUser, widget.group);
-    final canDel = canMachineManage(currentUser, widget.group);
+    final canDel = canFixRecords(); // görsel silme yalnız admin
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: _col.orderBy('t').snapshots(),
       builder: (context, snap) {

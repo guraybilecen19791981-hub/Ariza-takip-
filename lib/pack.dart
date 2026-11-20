@@ -912,10 +912,7 @@ class PackStatusChip extends StatelessWidget {
   Widget build(BuildContext context) => _Chip(o.statusLabel, o.statusBgColor, o.statusFgColor);
 }
 
-bool canDeletePack(PackOrder o) {
-  final me = currentUser;
-  return me != null && (me.isAdmin || me.can('paketleme', 'yonet') || (me.uid == o.ownerUid && me.can('paketleme', 'gir')));
-}
+bool canDeletePack(PackOrder o) => canFixRecords(); // silme yalnız admin
 
 Future<bool> askDeletePack(BuildContext context, PackOrder o) async {
   if (!canDeletePack(o)) {
@@ -923,7 +920,7 @@ Future<bool> askDeletePack(BuildContext context, PackOrder o) async {
     return false;
   }
   if (!await confirm(context, 'Sipariş tamamen silinsin mi?',
-      'Sipariş ${o.orderNo}, tüm koli girişleri, duruşlar ve görseller kalıcı olarak silinecek. Bu işlem geri alınamaz.', 'Sil')) {
+      'Sipariş ${o.orderNo}, tüm koli girişleri, duruşlar ve görselleriyle silinecek. 30 gün "Silinenler"de bekler, oradan geri getirilebilir.', 'Sil')) {
     return false;
   }
   try {
@@ -1590,6 +1587,7 @@ class PackDetailPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Paketleme detayı'), actions: [
+        if (canFixRecords())
         IconButton(
           tooltip: 'Siparişi sil',
           icon: const Icon(Icons.delete_outline),
@@ -1609,7 +1607,8 @@ class PackDetailPage extends StatelessWidget {
           if (!snap.hasData) return const Center(child: CircularProgressIndicator());
           if (!snap.data!.exists) return const Center(child: Text('Kayıt bulunamadı.'));
           final o = PackOrder.fromDoc(snap.data!);
-          final canEdit = canEditPack(o);
+          final canEdit = canEditPack(o); // günlük işlemler (koli, duruş, görsel)
+          final canFix = canFixRecords(); // sipariş ve kayıt düzeltme yalnız admin
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
@@ -1618,7 +1617,7 @@ class PackDetailPage extends StatelessWidget {
                 children: [
                   Row(children: [
                     Expanded(child: Text('Sipariş ${o.orderNo}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700))),
-                    if (canEdit)
+                    if (canFix)
                       IconButton(tooltip: 'Siparişi düzenle', icon: const Icon(Icons.edit), onPressed: () => editOrderDialog(context, o)),
                   ]),
                   Wrap(spacing: 6, runSpacing: 6, children: [
@@ -1683,7 +1682,7 @@ class PackDetailPage extends StatelessWidget {
               ],
               PackPhotos(order: o),
               const SizedBox(height: 10),
-              PackEvents(order: o, canEdit: canEdit),
+              PackEvents(order: o, canEdit: canFix),
             ],
           );
         },
@@ -1714,6 +1713,7 @@ class PackDetailPage extends StatelessWidget {
     );
     if (o.isFinished) {
       return [
+        if (canFixRecords())
         FilledButton.icon(
           style: FilledButton.styleFrom(backgroundColor: kDark),
           onPressed: () async {

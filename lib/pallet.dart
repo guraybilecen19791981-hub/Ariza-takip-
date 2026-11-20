@@ -458,7 +458,7 @@ class _PalletListState extends State<PalletList> {
                           Text('${o.palletCount}', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w700)),
                           const Text('palet', style: TextStyle(color: kMuted)),
                           Text('${o.totalBoxes}${o.orderedBoxes > 0 ? '/${o.orderedBoxes}' : ''} koli', style: const TextStyle(fontSize: 13)),
-                          if (o.isFinished && canEditPallet(o))
+                          if (o.isFinished && canFixRecords())
                             IconButton(
                               tooltip: 'Siparişi sil',
                               icon: const Icon(Icons.delete_outline, color: Color(0xFFC92A2A)),
@@ -882,6 +882,7 @@ class PalletDetailPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Paletleme detayı'), actions: [
+        if (canFixRecords())
         IconButton(
           tooltip: 'Siparişi sil',
           icon: const Icon(Icons.delete_outline),
@@ -904,14 +905,15 @@ class PalletDetailPage extends StatelessWidget {
           if (!snap.hasData) return const Center(child: CircularProgressIndicator());
           if (!snap.data!.exists) return const Center(child: Text('Kayıt bulunamadı.'));
           final o = PalletOrder.fromDoc(snap.data!);
-          final edit = canEditPallet(o);
+          final edit = canEditPallet(o); // günlük işlemler (palet ekleme, bitirme, sevk, görsel ekleme)
+          final fix = canFixRecords(); // sipariş / palet düzeltme ve silme yalnız admin
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
               _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Row(children: [
                   Expanded(child: Text('Sipariş ${o.orderNo}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700))),
-                  if (edit && !o.isFinished)
+                  if (fix && !o.isFinished)
                     IconButton(
                       tooltip: 'Düzenle',
                       icon: const Icon(Icons.edit),
@@ -987,7 +989,7 @@ class PalletDetailPage extends StatelessWidget {
                     },
                     child: const Text('Bitir'),
                   ),
-                if (edit && o.isFinished)
+                if (o.isFinished && (o.isShipped ? fix : edit))
                   FilledButton.icon(
                     style: FilledButton.styleFrom(backgroundColor: o.isShipped ? kDark : const Color(0xFF1B6B2B), minimumSize: const Size(0, 48)),
                     onPressed: () async {
@@ -1003,7 +1005,7 @@ class PalletDetailPage extends StatelessWidget {
                     icon: const Icon(Icons.local_shipping),
                     label: Text(o.isShipped ? 'Sevk tarihini düzelt' : 'Sevk edildi'),
                   ),
-                if (edit && o.isShipped)
+                if (fix && o.isShipped)
                   OutlinedButton(
                     style: OutlinedButton.styleFrom(minimumSize: const Size(0, 48)),
                     onPressed: () async {
@@ -1016,7 +1018,7 @@ class PalletDetailPage extends StatelessWidget {
                     },
                     child: const Text('Sevki geri al'),
                   ),
-                if (edit && o.isFinished)
+                if (fix && o.isFinished)
                   FilledButton.icon(
                     style: FilledButton.styleFrom(backgroundColor: kDark, minimumSize: const Size(0, 48)),
                     onPressed: () async {
@@ -1050,7 +1052,7 @@ class PalletDetailPage extends StatelessWidget {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: InkWell(
                           borderRadius: BorderRadius.circular(12),
-                          onTap: edit && !o.isFinished
+                          onTap: fix && !o.isFinished
                               ? () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => PalletFormPage(order: o, existing: p)))
                               : null,
                           child: _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1136,7 +1138,7 @@ class PalletPhotos extends StatelessWidget {
                     onTap: () => openStoredImage(context, url, data),
                     child: ClipRRect(borderRadius: BorderRadius.circular(8), child: storedImage(url, data, width: 96, height: 96)),
                   ),
-                  if (edit)
+                  if (canFixRecords())
                     Positioned(
                       right: 0,
                       top: 0,
@@ -1164,12 +1166,12 @@ class PalletPhotos extends StatelessWidget {
 }
 
 Future<bool> askDeletePallet(BuildContext context, PalletOrder o) async {
-  if (!canEditPallet(o)) {
+  if (!canFixRecords()) {
     toast('Silme yetkiniz yok.');
     return false;
   }
   if (!await confirm(context, 'Paletleme silinsin mi?',
-      'Sipariş ${o.orderNo}, tüm paletleri ve görselleri kalıcı olarak silinecek. Bu işlem geri alınamaz.', 'Sil')) {
+      'Sipariş ${o.orderNo}, tüm paletleri ve görselleriyle silinecek. 30 gün "Silinenler"de bekler, oradan geri getirilebilir.', 'Sil')) {
     return false;
   }
   try {
