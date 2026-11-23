@@ -250,6 +250,7 @@ class LineMachine {
   final double target; // vardiya hedefi (0 = hedef yok)
   final String targetUnit; // adet | kg
   final bool tesis; // tesis ekipmanı: üretime dahil değil (sipariş / üretim / hedef yok, sadece durum ve arıza)
+  final int jobPhotoPending; // açık siparişte onay bekleyen görsel sayısı
 
   LineMachine({
     required this.id,
@@ -285,6 +286,7 @@ class LineMachine {
     this.target = 0,
     this.targetUnit = 'adet',
     this.tesis = false,
+    this.jobPhotoPending = 0,
   });
 
   factory LineMachine.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -324,6 +326,7 @@ class LineMachine {
       target: _dbl(m['target']),
       targetUnit: m['targetUnit'] == 'kg' ? 'kg' : 'adet',
       tesis: m['tesis'] == true,
+      jobPhotoPending: _int(m['jobPhotoPending']),
     );
   }
 
@@ -533,6 +536,8 @@ class MJob {
   final Map<String, int> stops;
   final int dayCount;
   final int photoCount;
+  final int pendingApprovals; // onay bekleyen görsel sayısı
+  final List<String> approvalLog; // görsel onay / red kayıtları (Excel için)
   final String group;
   final double fpAdet;
   final double fpKg;
@@ -564,6 +569,8 @@ class MJob {
     required this.stops,
     required this.dayCount,
     this.photoCount = 0,
+    this.pendingApprovals = 0,
+    this.approvalLog = const <String>[],
     this.group = '',
     this.fpAdet = 0,
     this.fpKg = 0,
@@ -601,6 +608,8 @@ class MJob {
       stops: st,
       dayCount: _int(m['dayCount']),
       photoCount: _int(m['photoCount']),
+      pendingApprovals: _int(m['pendingApprovals']),
+      approvalLog: m['approvalLog'] is List ? (m['approvalLog'] as List).map((e) => e.toString()).toList() : const <String>[],
       group: (m['group'] ?? '').toString(),
       fpAdet: _dbl(m['fpAdet']),
       fpKg: _dbl(m['fpKg']),
@@ -1171,6 +1180,7 @@ class MachineOps {
       'jobFpKg': 0,
       'jobFuAdet': 0,
       'jobFuKg': 0,
+      'jobPhotoPending': 0,
     });
     batch.update(col.doc(m.id), upd);
     batch.set(entries.doc(),
@@ -1654,6 +1664,13 @@ class _MachineCard extends StatelessWidget {
             else
               const Text('Aktif sipariş yok', style: TextStyle(color: kMuted, fontWeight: FontWeight.w600, fontSize: 13)),
             if (m.hasJob && m.jobFireText.isNotEmpty) Text('Fire: ${m.jobFireText}', style: const TextStyle(fontSize: 12, color: Color(0xFFC92A2A))),
+            if (m.hasJob && m.jobPhotoPending > 0)
+              Container(
+                margin: const EdgeInsets.only(top: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(color: const Color(0xFFFFF3BF), borderRadius: BorderRadius.circular(999)),
+                child: Text('${m.jobPhotoPending} görsel onay bekliyor', style: const TextStyle(fontSize: 12, color: Color(0xFF6B4F00), fontWeight: FontWeight.w700)),
+              ),
             if (!m.tesis && (!m.off || (st?.tracked ?? 0) > 0))
               Text(
                 'Bu vardiya: verim %${(st?.efficiency ?? 0).toStringAsFixed(0)} · çalışma ${fmtSec(st?.run ?? 0)} · duruş ${fmtSec(st?.stopTotal ?? 0)} · üretim ${st?.qtyText ?? '—'}'
@@ -3126,6 +3143,11 @@ class _MachineJobsPageState extends State<MachineJobsPage> {
                         const Icon(Icons.photo_camera_outlined, size: 16, color: kMuted),
                         Text(' ${j.photoCount}  ', style: const TextStyle(color: kMuted, fontSize: 12)),
                       ],
+                      if (j.pendingApprovals > 0)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: Text('${j.pendingApprovals} onay bekliyor', style: const TextStyle(color: Color(0xFF6B4F00), fontSize: 12, fontWeight: FontWeight.w700)),
+                        ),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                         decoration: BoxDecoration(
@@ -3260,7 +3282,7 @@ Future<void> exportJobsExcel(MGroup g, List<MJob> jobs) async {
       t('Sipariş no'), t('Ürün kodu'), t('Makine'), t(g.lineLabel), t('Durum'), t('Başlangıç'), t('Bitiş'), t('Gün sayısı'), t('Üretim (adet)'), t('Üretim (kg)'),
       t('Paket fire (adet)'), t('Paket fire (kg)'), t('Ürün fire (adet)'), t('Ürün fire (kg)'),
       t('Çalışma (dk)'), t('Duruş (dk)'), t('Verimlilik %'), t('Hedef verimi %'), t('Vardiya hedefi'), t('Hedef birimi'), t('Beklenen üretim'), t('Gerçekleşen'),
-      for (final l in lab) t('$l (dk)'), t('Son çalışan'), t('Son günlükçü'), if (g.operators) t('Son operatör'), t('Başlatan'), t('Bitiş notu'), t('Notlar'),
+      for (final l in lab) t('$l (dk)'), t('Son çalışan'), t('Son günlükçü'), if (g.operators) t('Son operatör'), t('Başlatan'), t('Bitiş notu'), t('Notlar'), t('Görsel onayları'),
     ]);
     for (final j in jobs) {
       final sm = sums[j.id]!;
@@ -3273,6 +3295,7 @@ Future<void> exportJobsExcel(MGroup g, List<MJob> jobs) async {
         n(j.dayCount), dbl(j.qtyAdet), dbl(j.qtyKg), dbl(j.fpAdet), dbl(j.fpKg), dbl(j.fuAdet), dbl(j.fuKg), n(mins(run)), n(mins(stop)), dbl(run + stop == 0 ? 0 : run * 100 / (run + stop)),
         tx == null ? null : dbl(tx.pct), tx == null ? null : dbl(tx.target), t(tx == null ? '' : tx.unitLabel), tx == null ? null : dbl(tx.expected), tx == null ? null : dbl(tx.done),
         for (final l in lab) n(mins(st[l] ?? 0)), n(j.workers), n(j.daily), if (g.operators) n(j.operators), t(j.by), t(j.finishNote), t(NotesOps.joined(notes[j.id])),
+        t([if (j.pendingApprovals > 0) '${j.pendingApprovals} onay bekliyor', ...j.approvalLog].join(' | ')),
       ]);
     }
     final bytes = excel.encode();
@@ -3302,6 +3325,68 @@ class JobPhotosPage extends StatefulWidget {
   State<JobPhotosPage> createState() => _JobPhotosPageState();
 }
 
+// Sipariş görseli onayı: bilgi amaçlı ya da onay amaçlı (Kalite / İhracat). Tek onay yeterli; makine durumunu etkilemez.
+class JobPhotoOps {
+  static Future<void> add(String jobId, Uint8List bytes, List<String> approvers, String note) async {
+    final job = await MachineOps.jobs.doc(jobId).get();
+    final j = job.data() ?? <String, dynamic>{};
+    final fields = await photoFields('machineJobs/$jobId', bytes);
+    final ask = approvers.isNotEmpty;
+    await MachineOps.jobs.doc(jobId).collection('photos').add({
+      'i': DateTime.now().millisecondsSinceEpoch,
+      ...fields,
+      'by': currentUser?.name ?? '',
+      't': Timestamp.now(),
+      'note': note,
+      'purpose': ask ? 'onay' : 'bilgi',
+      'approvers': approvers,
+      'status': ask ? 'bekliyor' : 'bilgi',
+    });
+    await MachineOps.jobs.doc(jobId).update({'photoCount': FieldValue.increment(1), if (ask) 'pendingApprovals': FieldValue.increment(1)});
+    if (!ask) return;
+    final mid = (j['machineId'] ?? '').toString();
+    try {
+      final md = await MachineOps.col.doc(mid).get();
+      if ((md.data()?['jobId'] ?? '') == jobId) await MachineOps.col.doc(mid).update({'jobPhotoPending': FieldValue.increment(1)});
+    } catch (_) {}
+    // Onaycılara bildirim (telefonda ve açık web panelinde)
+    await db.collection('packAlerts').add({
+      'type': 'monay',
+      'jobId': jobId,
+      'group': (j['group'] ?? '').toString(),
+      'machineName': (j['machineName'] ?? '').toString(),
+      'orderNo': (j['orderNo'] ?? '').toString(),
+      'productCode': (j['productCode'] ?? '').toString(),
+      'targetRoles': approvers,
+      'by': currentUser?.name ?? '',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  static Future<void> decide(String jobId, QueryDocumentSnapshot<Map<String, dynamic>> d, String role, bool approve, String note) async {
+    final m = d.data();
+    if ((m['status'] ?? '') != 'bekliyor') return;
+    final job = await MachineOps.jobs.doc(jobId).get();
+    final mid = (job.data()?['machineId'] ?? '').toString();
+    final now = DateTime.now();
+    final who = currentUser?.name ?? '';
+    final b = db.batch();
+    b.update(d.reference, {
+      'status': approve ? 'onaylandi' : 'reddedildi',
+      'decision': {'status': approve ? 'onay' : 'red', 'role': role, 'by': who, 't': Timestamp.fromDate(now), 'note': note},
+    });
+    b.update(MachineOps.jobs.doc(jobId), {
+      'pendingApprovals': FieldValue.increment(-1),
+      'approvalLog': FieldValue.arrayUnion(['${fmtFull(now)} ${approverRoles()[role] ?? role} ($who): ${approve ? 'Onaylandı' : 'Reddedildi'}${note.isEmpty ? '' : ' - $note'}']),
+    });
+    try {
+      final md = await MachineOps.col.doc(mid).get();
+      if ((md.data()?['jobId'] ?? '') == jobId && _int(md.data()?['jobPhotoPending']) > 0) b.update(MachineOps.col.doc(mid), {'jobPhotoPending': FieldValue.increment(-1)});
+    } catch (_) {}
+    await b.commit();
+  }
+}
+
 class _JobPhotosPageState extends State<JobPhotosPage> {
   bool _busy = false;
 
@@ -3313,13 +3398,58 @@ class _JobPhotosPageState extends State<JobPhotosPage> {
       return;
     }
     final b = await pickPhotoBytes(context);
-    if (b == null) return;
+    if (b == null || !mounted) return;
+    // Bilgi amaçlı mı, onay amaçlı mı?
+    final roles = approverRoles();
+    final sel = <String>{};
+    var ask = false;
+    final note = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => StatefulBuilder(
+        builder: (d, setS) => AlertDialog(
+          title: const Text('Görsel ekle'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.memory(b, height: 140, fit: BoxFit.cover)),
+              const SizedBox(height: 8),
+              SegmentedButton<bool>(
+                segments: const [ButtonSegment(value: false, label: Text('Bilgi amaçlı')), ButtonSegment(value: true, label: Text('Onay amaçlı'))],
+                selected: {ask},
+                onSelectionChanged: (v) => setS(() {
+                  ask = v.first;
+                  if (ask && sel.isEmpty && roles.containsKey('kalite')) sel.add('kalite');
+                }),
+              ),
+              if (ask)
+                for (final r in roles.entries)
+                  CheckboxListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: sel.contains(r.key),
+                    title: Text('${r.value} onaylasın'),
+                    onChanged: (v) => setS(() => v == true ? sel.add(r.key) : sel.remove(r.key)),
+                  ),
+              if (ask) const Text('Seçilenlerden biri onay verince görsel onaylanır. Makinenin durumu değişmez.', style: TextStyle(color: kMuted, fontSize: 12)),
+              TextField(controller: note, decoration: const InputDecoration(labelText: 'Not (isteğe bağlı)')),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Vazgeç')),
+            FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Ekle')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    if (ask && sel.isEmpty) {
+      toast('Onay amaçlı görsel için en az bir onaycı seçin.');
+      return;
+    }
     setState(() => _busy = true);
     try {
-      final fields = await photoFields('machineJobs/${widget.jobId}', b);
-      await _col.add({'i': DateTime.now().millisecondsSinceEpoch, ...fields, 'by': currentUser?.name ?? '', 't': Timestamp.now()});
-      await MachineOps.jobs.doc(widget.jobId).update({'photoCount': FieldValue.increment(1)});
-      toast('Görsel eklendi');
+      await JobPhotoOps.add(widget.jobId, b, ask ? sel.toList() : <String>[], note.text.trim());
+      toast(ask ? 'Görsel eklendi, onaya gönderildi' : 'Görsel eklendi');
     } catch (e) {
       toast('Görsel eklenemedi: $e');
     } finally {
@@ -3330,22 +3460,36 @@ class _JobPhotosPageState extends State<JobPhotosPage> {
   Future<void> _delete(QueryDocumentSnapshot<Map<String, dynamic>> d) async {
     if (!await confirm(context, 'Görsel silinsin mi?', 'Bu görsel siparişten kaldırılır.', 'Sil')) return;
     try {
+      final pending = d.data()['status'] == 'bekliyor';
       await d.reference.delete();
       await deleteStoredPhoto(d.data()['path']);
-      await MachineOps.jobs.doc(widget.jobId).update({'photoCount': FieldValue.increment(-1)});
+      await MachineOps.jobs.doc(widget.jobId).update({'photoCount': FieldValue.increment(-1), if (pending) 'pendingApprovals': FieldValue.increment(-1)});
     } catch (e) {
       toast('Silinemedi: $e');
     }
   }
 
+  Future<void> _decide(QueryDocumentSnapshot<Map<String, dynamic>> d, String role, bool approve) async {
+    final note = await askText(context, approve ? 'Görsel onaylansın mı?' : 'Görsel reddedilsin mi?', approve ? 'Açıklama (isteğe bağlı)' : 'Red nedeni',
+        ok: approve ? 'Onayla' : 'Reddet', mustFill: !approve);
+    if (note == null) return;
+    try {
+      await JobPhotoOps.decide(widget.jobId, d, role, approve, note.trim());
+      toast(approve ? 'Onaylandı' : 'Reddedildi');
+    } catch (e) {
+      toast('Kaydedilemedi: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final canAdd = canMachineEnter(currentUser, widget.group);
+    final me = currentUser;
+    final canAdd = canMachineEnter(me, widget.group);
     final canDel = canFixRecords(); // görsel silme yalnız admin
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: _col.orderBy('t').snapshots(),
       builder: (context, snap) {
-        final docs = snap.data?.docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+        final docs = (snap.data?.docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[]).reversed.toList();
         return Scaffold(
           appBar: AppBar(title: Text('Sipariş ${widget.orderNo} · görseller (${docs.length}/$kMaxPhotos)')),
           floatingActionButton: canAdd && docs.length < kMaxPhotos
@@ -3367,35 +3511,63 @@ class _JobPhotosPageState extends State<JobPhotosPage> {
                       ? const Center(
                           child: Padding(
                             padding: EdgeInsets.all(24),
-                            child: Text('Henüz görsel yok. Ürün görseli, etiket, numune gibi fotoğrafları "Görsel ekle" ile ekleyin.',
+                            child: Text('Henüz görsel yok. Ürün görseli, etiket, numune gibi fotoğrafları "Görsel ekle" ile ekleyin; onay gerekiyorsa "Onay amaçlı" seçin.',
                                 textAlign: TextAlign.center, style: TextStyle(color: kMuted)),
                           ),
                         )
-                      : GridView.builder(
+                      : ListView.separated(
                           padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
-                          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(maxCrossAxisExtent: 160, mainAxisSpacing: 8, crossAxisSpacing: 8),
                           itemCount: docs.length,
+                          separatorBuilder: (_, __) => const SizedBox(height: 8),
                           itemBuilder: (context, i) {
-                            final m = docs[i].data();
+                            final d = docs[i];
+                            final m = d.data();
                             final url = (m['url'] ?? '').toString();
                             final data = (m['data'] ?? '').toString();
-                            return GestureDetector(
-                              onTap: () => openStoredImage(context, url, data),
-                              onLongPress: canDel ? () => _delete(docs[i]) : null,
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(10),
-                                child: Stack(fit: StackFit.expand, children: [
-                                  storedImage(url, data),
-                                  Positioned(
-                                    left: 0,
-                                    right: 0,
-                                    bottom: 0,
-                                    child: Container(
-                                      color: Colors.black45,
-                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                      child: Text('${m['by'] ?? ''} · ${fmtDT(tsToDate(m['t']))}',
-                                          maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 11)),
-                                    ),
+                            final st = (m['status'] ?? 'bilgi').toString();
+                            final approvers = m['approvers'] is List ? (m['approvers'] as List).map((e) => e.toString()).toList() : <String>[];
+                            final dec = m['decision'] is Map ? Map<String, dynamic>.from(m['decision'] as Map) : null;
+                            final note = (m['note'] ?? '').toString();
+                            final (label, color) = switch (st) {
+                              'bekliyor' => ('Onay bekliyor · ${approvers.map((r) => approverRoles()[r] ?? r).join(' / ')}', const Color(0xFF6B4F00)),
+                              'onaylandi' => ('Onaylandı', const Color(0xFF1B6B2B)),
+                              'reddedildi' => ('Reddedildi', const Color(0xFFC92A2A)),
+                              _ => ('Bilgi amaçlı', kMuted),
+                            };
+                            final myRoles = me == null || st != 'bekliyor' ? <String>[] : approvers.where((r) => me.role == r || me.isAdmin).toList();
+                            return Card(
+                              margin: EdgeInsets.zero,
+                              child: Padding(
+                                padding: const EdgeInsets.all(10),
+                                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                  GestureDetector(
+                                    onTap: () => openStoredImage(context, url, data),
+                                    onLongPress: canDel ? () => _delete(d) : null,
+                                    child: ClipRRect(borderRadius: BorderRadius.circular(8), child: storedImage(url, data, width: 110, height: 110)),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                      Text(label, style: TextStyle(color: color, fontWeight: FontWeight.w800)),
+                                      Text('${m['by'] ?? ''} · ${fmtDT(tsToDate(m['t']))}', style: const TextStyle(color: kMuted, fontSize: 12)),
+                                      if (note.isNotEmpty) Text(note, style: const TextStyle(fontSize: 13)),
+                                      if (dec != null)
+                                        Text('${approverRoles()[dec['role']] ?? dec['role'] ?? ''} · ${dec['by'] ?? ''} · ${fmtDT(tsToDate(dec['t']))}${(dec['note'] ?? '').toString().isEmpty ? '' : ' · ${dec['note']}'}',
+                                            style: TextStyle(color: color, fontSize: 12)),
+                                      if (myRoles.isNotEmpty)
+                                        Wrap(spacing: 6, children: [
+                                          FilledButton(
+                                            style: FilledButton.styleFrom(backgroundColor: kGreen, visualDensity: VisualDensity.compact),
+                                            onPressed: () => _decide(d, myRoles.first, true),
+                                            child: const Text('Onayla'),
+                                          ),
+                                          OutlinedButton(
+                                            style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFC92A2A), visualDensity: VisualDensity.compact),
+                                            onPressed: () => _decide(d, myRoles.first, false),
+                                            child: const Text('Reddet'),
+                                          ),
+                                        ]),
+                                    ]),
                                   ),
                                 ]),
                               ),

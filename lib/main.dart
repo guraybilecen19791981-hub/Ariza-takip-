@@ -558,7 +558,7 @@ class Notifier {
     await notif.initialize(settings, onDidReceiveNotificationResponse: (NotificationResponse r) {
       final id = r.payload;
       if (id != null && id.isNotEmpty) {
-        if (!id.startsWith('pack:')) cancel(id);
+        if (!id.startsWith('pack:') && !id.startsWith('mjob:')) cancel(id);
         openPayload(id);
       }
     });
@@ -632,6 +632,20 @@ class Notifier {
         const NotificationDetails(android: details), payload: 'pack:$orderId');
   }
 
+  // Makine siparişine onay amaçlı görsel eklendi (Kalite / İhracat)
+  static Future<void> jobPhoto(String jobId, String title, String body) async {
+    const details = AndroidNotificationDetails(
+      'paket_uyari_v1',
+      'Paketleme uyarıları',
+      channelDescription: 'Ürün yok / kalite onayı bekleniyor duruşları',
+      importance: Importance.max,
+      priority: Priority.max,
+      enableVibration: true,
+    );
+    await notif.show(DateTime.now().millisecondsSinceEpoch & 0x3fffffff, title, body,
+        const NotificationDetails(android: details), payload: 'mjob:$jobId');
+  }
+
   static Future<void> machineAlert(String id, String title, String body, [String group = 'sargi']) async {
     final details = AndroidNotificationDetails(
       'makine_alarm_v1',
@@ -689,6 +703,15 @@ void openPayload(String payload) {
     final g = mGroupOf(rest.contains('|') ? rest.split('|').first : 'sargi');
     navKey.currentState?.push(MaterialPageRoute(
         builder: (_) => Scaffold(appBar: AppBar(title: Text(g.title)), body: MachineLive(group: g))));
+    return;
+  }
+  if (payload.startsWith('mjob:')) {
+    final id = payload.substring(5);
+    MachineOps.jobs.doc(id).get().then((d) {
+      final m = d.data() ?? <String, dynamic>{};
+      navKey.currentState?.push(MaterialPageRoute(
+          builder: (_) => JobPhotosPage(jobId: id, orderNo: (m['orderNo'] ?? '').toString(), group: mGroupOf((m['group'] ?? '').toString()))));
+    }).catchError((_) {});
     return;
   }
   if (payload.startsWith('pack:')) {
@@ -779,7 +802,15 @@ class Watchers {
           final m = c.doc.data() ?? <String, dynamic>{};
           if (!_seen.add('alert:${c.doc.id}')) continue;
           final type = (m['type'] ?? 'durus').toString();
-          if (type == 'onay') {
+          if (type == 'monay') {
+            final targets = (m['targetRoles'] is List) ? (m['targetRoles'] as List).map((e) => e.toString()).toList() : <String>[];
+            if (!targets.contains(u.role) && !u.isAdmin) continue;
+            Notifier.jobPhoto(
+              (m['jobId'] ?? '').toString(),
+              'Görsel onayı bekleniyor: ${m['machineName'] ?? ''}',
+              'Sipariş ${m['orderNo'] ?? ''} · ${m['productCode'] ?? ''} · ${m['by'] ?? ''}',
+            );
+          } else if (type == 'onay') {
             final targets = (m['targetRoles'] is List) ? (m['targetRoles'] as List).map((e) => e.toString()).toList() : <String>[];
             if (!targets.contains(u.role) && !u.isAdmin) continue;
             Notifier.packAlert(

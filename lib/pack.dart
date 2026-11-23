@@ -635,20 +635,8 @@ class PackOps {
       't': Timestamp.now(),
       'note': note,
     };
-    String status = 'bekliyor';
-    bool anyRed = false;
-    bool allOk = true;
-    for (final r in p.approvers) {
-      final a = approvals[r];
-      final st = (a is Map) ? (a['status'] ?? '').toString() : '';
-      if (st == 'red') anyRed = true;
-      if (st != 'onay') allOk = false;
-    }
-    if (anyRed) {
-      status = 'reddedildi';
-    } else if (allOk) {
-      status = 'onaylandi';
-    }
+    // Tek onay yeterli: Kalite ya da İhracat (onay veren herhangi bir rol) onaylarsa görsel onaylanır, reddederse reddedilir
+    final status = approve ? 'onaylandi' : 'reddedildi';
     await ref(o.id).collection('photos').doc(p.id).update({'approvals': approvals, 'status': status});
     if (p.status == 'bekliyor' && status != 'bekliyor') {
       await ref(o.id).update({'pendingApprovals': FieldValue.increment(-1), 'lastUpdateAt': Timestamp.now()});
@@ -1866,7 +1854,7 @@ class PackPhotos extends StatelessWidget {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text('${approverRoles()[r] ?? r}: ${p.roleInfo(r)}',
+                                Text('${approverRoles()[r] ?? r}: ${p.roleStatus(r).isEmpty && p.status != 'bekliyor' ? 'gerek yok' : p.roleInfo(r)}',
                                     style: TextStyle(
                                       fontSize: 12,
                                       color: p.roleStatus(r) == 'onay'
@@ -1874,7 +1862,7 @@ class PackPhotos extends StatelessWidget {
                                           : (p.roleStatus(r) == 'red' ? const Color(0xFFC92A2A) : const Color(0xFF6B4F00)),
                                       fontWeight: FontWeight.w600,
                                     )),
-                                if (me != null && (me.role == r || me.isAdmin))
+                                if (me != null && (me.role == r || me.isAdmin) && p.status == 'bekliyor')
                                   Wrap(spacing: 6, children: [
                                     OutlinedButton(
                                       onPressed: () async {
