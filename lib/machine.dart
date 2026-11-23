@@ -442,6 +442,7 @@ class MEntry {
   final double fu; // ürün fire
   final String fuUnit;
   final int operators;
+  final String customer; // gün sonu girişinde müşteri adı
 
   MEntry({
     required this.id,
@@ -465,6 +466,7 @@ class MEntry {
     this.fu = 0,
     this.fuUnit = 'adet',
     this.operators = 0,
+    this.customer = '',
   });
 
   factory MEntry.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -491,6 +493,7 @@ class MEntry {
       fu: _dbl(m['fu']),
       fuUnit: (m['fuUnit'] ?? 'adet').toString(),
       operators: _int(m['operators']),
+      customer: (m['customer'] ?? '').toString(),
     );
   }
 
@@ -1348,6 +1351,12 @@ class MachineHome extends StatelessWidget {
             icon: const Icon(Icons.inventory_outlined),
             onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MachineJobsPage(group: group))),
           ),
+          if (group != kTesis && canMachineEnter(me, group))
+            IconButton(
+              tooltip: 'Gün sonu girişi',
+              icon: const Icon(Icons.playlist_add),
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => BulkProductionPage(group: group))),
+            ),
           IconButton(
             tooltip: 'Rapor ve Excel',
             icon: const Icon(Icons.bar_chart),
@@ -1740,6 +1749,15 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
                 ]),
               ),
             ],
+            if (!m.hasFault && !m.off) ...[
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFC92A2A), side: const BorderSide(color: Color(0xFFC92A2A)), minimumSize: const Size.fromHeight(46)),
+                onPressed: () => Navigator.pop(c, 'f_durussuz'),
+                icon: const Icon(Icons.build_circle_outlined),
+                label: const Text('Arıza bildir (makine çalışıyor)', style: TextStyle(fontWeight: FontWeight.w700)),
+              ),
+            ],
             if (!m.tesis) ...[
             const SizedBox(height: 12),
             const Text('Sipariş', style: TextStyle(fontWeight: FontWeight.w700)),
@@ -1853,6 +1871,11 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
         await Navigator.of(context)
             .push(MaterialPageRoute(builder: (_) => JobPhotosPage(jobId: m.jobId, orderNo: m.orderNo, group: m.grp)));
         return;
+      }
+    case 'f_durussuz':
+      {
+        final r = reasons.where((x) => x.fault).firstOrNull ?? const MReason('ariza', 'Arızalı', true, true);
+        return reportFaultFlow(context, m, r, '', noStop0: true);
       }
     case 'f_detay':
       {
@@ -2412,7 +2435,10 @@ class _JobAgg {
   final String productCode;
   final MStat st;
   int ppl = 0;
+  String customer = '';
+  bool byNo = false; // siparişe bağlı olmayan gün sonu girişi (sipariş numarasına göre)
   _JobAgg(this.machineId, this.jobId, this.orderNo, this.productCode) : st = MStat(jobId, '', '');
+  bool get named => jobId.isNotEmpty || byNo;
 }
 
 Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog> logs, List<MEntry> entries, List<TimeWin> wins, MShift shift,
@@ -2515,7 +2541,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     }
 
     prod.appendRow(<xl.CellValue?>[
-      t('Makine'), t(hl), t('Tarih saat'), t('İşlem'), t('Sipariş no'), t('Ürün kodu'), t('Miktar'), t('Birim'), t('Paket fire'), t('Birim'), t('Ürün fire'), t('Birim'),
+      t('Makine'), t(hl), t('Tarih saat'), t('İşlem'), t('Müşteri'), t('Sipariş no'), t('Ürün kodu'), t('Miktar'), t('Birim'), t('Paket fire'), t('Birim'), t('Ürün fire'), t('Birim'),
       t('Çalışan'), t('Günlükçü'), if (g.operators) t('Operatör'), t('Toplam kişi'), t('Giren'), t('Not / değişiklik'),
     ]);
     final es = entries.where((e) => e.t != null && wins.any((w) => w.contains(e.t!))).toList()
@@ -2525,7 +2551,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
       });
     for (final e in es) {
       prod.appendRow(<xl.CellValue?>[
-        t(e.machineName), t(e.line), t(fmtFull(e.t)), t(e.kindLabel), t(e.orderNo), t(e.productCode),
+        t(e.machineName), t(e.line), t(fmtFull(e.t)), t(e.kindLabel), t(e.customer), t(e.orderNo), t(e.productCode),
         e.isProd && e.qty > 0 ? dbl(e.qty) : null, t(e.isProd && e.qty > 0 ? (kMUnits[e.unit] ?? e.unit) : ''),
         e.fp > 0 ? dbl(e.fp) : null, t(e.fp > 0 ? (kMUnits[e.fpUnit] ?? e.fpUnit) : ''),
         e.fu > 0 ? dbl(e.fu) : null, t(e.fu > 0 ? (kMUnits[e.fuUnit] ?? e.fuUnit) : ''),
@@ -2555,7 +2581,7 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     // Sipariş bazlı: siparişsiz süreler de ayrı satırda; her makinenin satır toplamı Özet ile aynı
     final xl.Sheet byJob = excel['Sipariş bazlı'];
     byJob.appendRow(<xl.CellValue?>[
-      t('Makine'), t(hl), t('Sipariş no'), t('Ürün kodu'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), ...teHead, t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
+      t('Makine'), t(hl), t('Sipariş no'), t('Ürün kodu'), t('Müşteri'), t('Çalışma (dk)'), t('Toplam duruş (dk)'), t('Verimlilik %'), ...teHead, t('Üretim (adet)'), t('Üretim (kg)'), ...fireHead,
       t('Kişi (son)'), t('En çok duruş nedeni'),
     ]);
     final jobs = <String, _JobAgg>{};
@@ -2573,7 +2599,9 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     }
     for (final e in es) {
       if (!e.isProd) continue;
-      final k = jobs.putIfAbsent('${e.machineId}|${e.jobId}', () => _JobAgg(e.machineId, e.jobId, e.orderNo, e.productCode));
+      final noJob = e.jobId.isEmpty && e.orderNo.isNotEmpty;
+      final k = jobs.putIfAbsent('${e.machineId}|${noJob ? '#${e.orderNo}' : e.jobId}', () => _JobAgg(e.machineId, e.jobId, e.orderNo, e.productCode)..byNo = noJob);
+      if (k.customer.isEmpty && e.customer.isNotEmpty) k.customer = e.customer;
       if (e.unit == 'kg') {
         k.st.qtyKg += e.qty;
       } else {
@@ -2583,14 +2611,14 @@ Future<void> exportMachineExcel(MGroup g, List<LineMachine> machines, List<MLog>
     }
     for (final s in list) {
       final m = mm[s.id]!;
-      final rows = jobs.values.where((k) => k.machineId == s.id).toList()..sort((a, b) => (a.jobId.isEmpty ? 1 : 0).compareTo(b.jobId.isEmpty ? 1 : 0));
+      final rows = jobs.values.where((k) => k.machineId == s.id).toList()..sort((a, b) => (a.named ? 0 : 1).compareTo(b.named ? 0 : 1));
       final runR = lrRound([for (final k in rows) k.st.run / 60], m.run);
       final stopR = lrRound([for (final k in rows) k.st.stopTotal / 60], m.stop);
       for (var i = 0; i < rows.length; i++) {
         final k = rows[i];
         final top = k.st.stops.entries.isEmpty ? null : (k.st.stops.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).first;
         byJob.appendRow(<xl.CellValue?>[
-          t(s.name), t(s.line), t(k.jobId.isEmpty ? '(siparişsiz)' : k.orderNo), t(k.jobId.isEmpty ? '' : k.productCode), n(runR[i]), n(stopR[i]), dbl(k.st.efficiency), ...teCells(te(s.id, k.st)),
+          t(s.name), t(s.line), t(k.named ? k.orderNo : '(siparişsiz)'), t(k.named ? k.productCode : ''), t(k.customer), n(runR[i]), n(stopR[i]), dbl(k.st.efficiency), ...teCells(te(s.id, k.st)),
           dbl(k.st.qtyAdet), dbl(k.st.qtyKg), ...fireCells(k.st), k.jobId.isEmpty ? null : n(k.ppl), t(top == null ? '' : '${top.key} (${mins(top.value)} dk)'),
         ]);
       }
@@ -3374,6 +3402,262 @@ class _JobPhotosPageState extends State<JobPhotosPage> {
                             );
                           },
                         ),
+        );
+      },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Gün sonu toplu üretim girişi: satır satır makine, müşteri, sipariş no, ürün no, birim, miktar,
+// fire birimi, fire miktarı. Her satır o makinenin üretimine yazılır; sipariş no makinedeki açık
+// siparişle aynıysa siparişin toplamına da eklenir.
+// ---------------------------------------------------------------------------
+
+class _BulkRow {
+  String machineId = '';
+  final customer = TextEditingController();
+  final orderNo = TextEditingController();
+  final productCode = TextEditingController();
+  final qty = TextEditingController();
+  final fire = TextEditingController();
+  String unit = 'adet';
+  String fireUnit = 'adet';
+  void dispose() {
+    for (final c in [customer, orderNo, productCode, qty, fire]) {
+      c.dispose();
+    }
+  }
+}
+
+double _num(String s) => double.tryParse(s.trim().replaceAll(' ', '').replaceAll(',', '.')) ?? 0;
+
+class BulkProductionPage extends StatefulWidget {
+  final MGroup group;
+  const BulkProductionPage({super.key, required this.group});
+  @override
+  State<BulkProductionPage> createState() => _BulkProductionPageState();
+}
+
+class _BulkProductionPageState extends State<BulkProductionPage> {
+  DateTime _day = dayStart(DateTime.now());
+  final List<_BulkRow> _rows = [_BulkRow()];
+  bool _busy = false;
+  late final Stream<List<LineMachine>> _ms = MachineOps.machinesStream(widget.group);
+
+  @override
+  void dispose() {
+    for (final r in _rows) {
+      r.dispose();
+    }
+    super.dispose();
+  }
+
+  void _addRow() {
+    final last = _rows.last;
+    setState(() => _rows.add(_BulkRow()
+      ..machineId = last.machineId
+      ..unit = last.unit
+      ..fireUnit = last.fireUnit
+      ..customer.text = last.customer.text));
+  }
+
+  Future<void> _save(List<LineMachine> machines) async {
+    final rows = _rows.where((r) => r.machineId.isNotEmpty && (_num(r.qty.text) > 0 || _num(r.fire.text) > 0)).toList();
+    if (rows.isEmpty) {
+      toast('Kaydedilecek satır yok (makine ve miktar / fire girin).');
+      return;
+    }
+    if (!await confirm(context, 'Gün sonu girişi kaydedilsin mi?', '${fmtDay(_day)} tarihine ${rows.length} satır üretim / fire girişi yazılacak.', 'Kaydet')) return;
+    setState(() => _busy = true);
+    try {
+      final now = DateTime.now();
+      final t = dayStart(now) == _day ? now : DateTime(_day.year, _day.month, _day.day, 17);
+      var b = db.batch();
+      var n = 0;
+      final mInc = <String, Map<String, double>>{};
+      final jInc = <String, Map<String, double>>{};
+      void add(Map<String, double> o, String k, double v) => o[k] = (o[k] ?? 0) + v;
+      String k(String u) => u == 'kg' ? 'Kg' : 'Adet';
+      for (final r in rows) {
+        final m = machines.where((x) => x.id == r.machineId).firstOrNull;
+        if (m == null) continue;
+        final qty = _num(r.qty.text), fire = _num(r.fire.text), orderNo = r.orderNo.text.trim();
+        final same = m.hasJob && m.orderNo.trim() == orderNo;
+        b.set(MachineOps.entries.doc(), {
+          'group': m.group,
+          'machineId': m.id,
+          'machineName': m.name,
+          'line': m.line,
+          'kind': 'uretim',
+          'qty': qty,
+          'unit': r.unit,
+          'productCode': r.productCode.text.trim(),
+          'customer': r.customer.text.trim(),
+          'workers': 0,
+          'daily': 0,
+          'operators': 0,
+          'jobId': same ? m.jobId : '',
+          'orderNo': orderNo,
+          't': Timestamp.fromDate(t),
+          'tMs': t.millisecondsSinceEpoch,
+          'by': currentUser?.name ?? '',
+          'byUid': currentUser?.uid ?? '',
+          'text': 'Gün sonu girişi',
+          'fp': 0,
+          'fpUnit': 'adet',
+          'fu': fire,
+          'fuUnit': r.fireUnit,
+          'bulk': true,
+        });
+        if (++n >= 400) {
+          await b.commit();
+          b = db.batch();
+          n = 0;
+        }
+        if (same) {
+          final mi = mInc.putIfAbsent(m.id, () => <String, double>{});
+          final ji = jInc.putIfAbsent(m.jobId, () => <String, double>{});
+          if (qty > 0) {
+            add(mi, 'job${k(r.unit)}', qty);
+            add(ji, 'qty${k(r.unit)}', qty);
+          }
+          if (fire > 0) {
+            add(mi, 'jobFu${k(r.fireUnit)}', fire);
+            add(ji, 'fu${k(r.fireUnit)}', fire);
+          }
+        }
+      }
+      mInc.forEach((id, o) {
+        b.update(MachineOps.col.doc(id), {for (final e in o.entries) e.key: FieldValue.increment(e.value)});
+        n++;
+      });
+      jInc.forEach((id, o) {
+        b.update(MachineOps.jobs.doc(id), {for (final e in o.entries) e.key: FieldValue.increment(e.value)});
+        n++;
+      });
+      if (n > 0) await b.commit();
+      toast('${rows.length} satır kaydedildi');
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      toast('Kaydedilemedi: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _unit(String v, void Function(String) on) => DropdownButtonFormField<String>(
+        value: v,
+        isDense: true,
+        decoration: const InputDecoration(isDense: true),
+        items: [for (final e in kMUnits.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
+        onChanged: (x) => setState(() => on(x ?? 'adet')),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<LineMachine>>(
+      stream: _ms,
+      builder: (context, snap) {
+        final machines = (snap.data ?? const <LineMachine>[]).where((m) => !m.tesis).toList();
+        final filled = _rows.where((r) => r.machineId.isNotEmpty && (_num(r.qty.text) > 0 || _num(r.fire.text) > 0)).length;
+        return Scaffold(
+          appBar: AppBar(title: Text('${widget.group.title} · gün sonu girişi')),
+          floatingActionButton: FloatingActionButton.extended(
+            backgroundColor: kOrange,
+            foregroundColor: Colors.white,
+            onPressed: _busy || filled == 0 ? null : () => _save(machines),
+            icon: const Icon(Icons.save),
+            label: Text(_busy ? 'Kaydediliyor…' : 'Kaydet ($filled satır)'),
+          ),
+          body: ListView(padding: const EdgeInsets.fromLTRB(12, 12, 12, 96), children: [
+            OutlinedButton.icon(
+              onPressed: () async {
+                final d = await showDatePicker(context: context, initialDate: _day, firstDate: DateTime(2024), lastDate: DateTime.now());
+                if (d != null) setState(() => _day = dayStart(d));
+              },
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text('Tarih: ${fmtDay(_day)}'),
+            ),
+            const SizedBox(height: 4),
+            const Text('Her satır seçilen makinenin üretimine kaydedilir. Sipariş no makinede açık olan siparişle aynıysa siparişin toplamına da eklenir.',
+                style: TextStyle(color: kMuted, fontSize: 12)),
+            const SizedBox(height: 8),
+            for (var i = 0; i < _rows.length; i++)
+              Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 6, 10),
+                  child: Column(children: [
+                    Row(children: [
+                      Text('${i + 1}', style: const TextStyle(fontWeight: FontWeight.w800, color: kMuted)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          value: machines.any((m) => m.id == _rows[i].machineId) ? _rows[i].machineId : null,
+                          isExpanded: true,
+                          decoration: const InputDecoration(labelText: 'Makine', isDense: true),
+                          items: [
+                            for (final m in machines) DropdownMenuItem(value: m.id, child: Text('${m.name}${m.line.isEmpty ? '' : ' · ${m.line}'}', overflow: TextOverflow.ellipsis)),
+                          ],
+                          onChanged: (v) => setState(() {
+                            final r = _rows[i];
+                            r.machineId = v ?? '';
+                            final m = machines.where((x) => x.id == v).firstOrNull;
+                            if (m != null && m.hasJob && r.orderNo.text.isEmpty) {
+                              r.orderNo.text = m.orderNo;
+                              if (r.productCode.text.isEmpty) r.productCode.text = m.productCode;
+                              r.unit = m.unit;
+                            }
+                          }),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Satırı sil',
+                        onPressed: _rows.length == 1
+                            ? null
+                            : () => setState(() {
+                                  _rows.removeAt(i).dispose();
+                                }),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ]),
+                    TextField(controller: _rows[i].customer, decoration: const InputDecoration(labelText: 'Müşteri adı', isDense: true)),
+                    Row(children: [
+                      Expanded(child: TextField(controller: _rows[i].orderNo, decoration: const InputDecoration(labelText: 'Sipariş no', isDense: true))),
+                      const SizedBox(width: 8),
+                      Expanded(child: TextField(controller: _rows[i].productCode, decoration: const InputDecoration(labelText: 'Ürün no', isDense: true))),
+                    ]),
+                    Row(children: [
+                      Expanded(
+                        flex: 3,
+                        child: TextField(
+                          controller: _rows[i].qty,
+                          onChanged: (_) => setState(() {}),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: const InputDecoration(labelText: 'Üretim miktarı', isDense: true),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(flex: 2, child: _unit(_rows[i].unit, (v) => _rows[i].unit = v)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        flex: 3,
+                        child: TextField(
+                          controller: _rows[i].fire,
+                          onChanged: (_) => setState(() {}),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                          decoration: const InputDecoration(labelText: 'Fire miktarı', isDense: true),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(flex: 2, child: _unit(_rows[i].fireUnit, (v) => _rows[i].fireUnit = v)),
+                    ]),
+                  ]),
+                ),
+              ),
+            OutlinedButton.icon(onPressed: _addRow, icon: const Icon(Icons.add), label: const Text('Satır ekle')),
+          ]),
         );
       },
     );

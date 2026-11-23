@@ -870,7 +870,7 @@ class _PalletFormPageState extends State<PalletFormPage> {
           ])),
           const SizedBox(height: 20),
           FilledButton(onPressed: _busy ? null : _save, child: Text(_busy ? 'Kaydediliyor…' : 'Paleti kaydet')),
-          if (widget.existing != null) ...[
+          if (widget.existing != null && canFixRecords()) ...[
             const SizedBox(height: 10),
             OutlinedButton(
               style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48), foregroundColor: const Color(0xFFC92A2A)),
@@ -1076,7 +1076,8 @@ class PalletDetailPage extends StatelessWidget {
                         padding: const EdgeInsets.only(bottom: 8),
                         child: InkWell(
                           borderRadius: BorderRadius.circular(12),
-                          onTap: fix && !o.isFinished && !p.shipped
+                          // palet içeriğini düzeltmek Girer / düzenler yetkisinde (sevk edilmemiş paletler); silme yalnız admin
+                          onTap: edit && !o.isFinished && !p.shipped
                               ? () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => PalletFormPage(order: o, existing: p)))
                               : null,
                           child: Container(

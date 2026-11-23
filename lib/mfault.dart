@@ -692,10 +692,10 @@ Future<Uint8List?> pickPhotoBytes(BuildContext context) async {
 }
 
 // Operatör: arıza bildirimi (açıklama + isteğe bağlı fotoğraf)
-Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, String note) async {
+Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, String note, {bool noStop0 = false}) async {
   final desc = TextEditingController(text: note);
   final photos = <Uint8List>[];
-  var noStop = false;
+  var noStop = noStop0;
   final ok = await showDialog<bool>(
     context: context,
     builder: (d) => StatefulBuilder(
@@ -893,7 +893,8 @@ Future<AppUser?> pickTechnician(BuildContext context, String title, {bool allowS
   List<AppUser> techs;
   try {
     final s = await db.collection('users').get();
-    techs = s.docs.map((d) => AppUser.fromDoc(d)).where((u) => u.role != 'bekliyor' && (u.isAdmin || u.can('teknik', 'gir'))).toList()
+    // Yalnız teknisyenler ve teknik hizmet ekibi (adminler listede çıkmaz; admin yine her şeyi görür ve atar)
+    techs = s.docs.map((d) => AppUser.fromDoc(d)).where((u) => u.role != 'bekliyor' && !u.isAdmin && (u.role == 'teknisyen' || u.can('teknik', 'gir'))).toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
   } catch (e) {
     toast('Kullanıcılar okunamadı: $e');
@@ -908,13 +909,13 @@ Future<AppUser?> pickTechnician(BuildContext context, String title, {bool allowS
         constraints: BoxConstraints(maxHeight: MediaQuery.of(c).size.height * 0.7),
         child: ListView(shrinkWrap: true, children: [
           ListTile(title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700))),
-          if (allowSelf && currentUser != null)
+          if (allowSelf && currentUser != null && !currentUser!.isAdmin)
             ListTile(
               leading: const Icon(Icons.person_pin),
               title: const Text('Kendim üstleniyorum'),
               onTap: () => Navigator.pop(c, currentUser),
             ),
-          for (final u in techs.where((u) => (!allowSelf || u.uid != currentUser?.uid) && !exclude.contains(u.uid)))
+          for (final u in techs.where((u) => u.uid != currentUser?.uid && !exclude.contains(u.uid)))
             ListTile(
               leading: Icon(Icons.circle, size: 12, color: u.isOnline ? const Color(0xFF2F9E44) : const Color(0xFFADB5BD)),
               title: Text(u.name),
@@ -924,7 +925,7 @@ Future<AppUser?> pickTechnician(BuildContext context, String title, {bool allowS
           if (techs.isEmpty)
             const Padding(
               padding: EdgeInsets.all(16),
-              child: Text('Teknik hizmet yetkisi (Girer) olan kullanıcı yok. Kullanıcılar sayfasından verin.', style: TextStyle(color: kMuted)),
+              child: Text('Teknisyen yok. Kullanıcılar sayfasından teknisyen rolü ya da Teknik hizmet (Girer) yetkisi verin.', style: TextStyle(color: kMuted)),
             ),
         ]),
       ),
