@@ -84,6 +84,51 @@ Future<void> changeOwnPasswordDialog(BuildContext context) async {
   }
 }
 
+// Admin: kullanıcıyı kalıcı siler (giriş hesabı + profil). Hata yoksa null döner.
+const String kDelFnUrl = 'https://us-central1-ariza-takip-3bce3.cloudfunctions.net/adminDeleteUser';
+Future<String?> adminDeleteUser(String uid) async {
+  if (kIsWeb) return 'Web sürümünde yapılamıyor; web panelinden ya da telefondan silin.';
+  final token = await FirebaseAuth.instance.currentUser?.getIdToken();
+  if (token == null) return 'Oturum bulunamadı.';
+  final client = HttpClient();
+  try {
+    final req = await client.postUrl(Uri.parse(kDelFnUrl)).timeout(const Duration(seconds: 20));
+    req.headers.set('Authorization', 'Bearer $token');
+    req.headers.contentType = ContentType.json;
+    req.add(utf8.encode(jsonEncode({'uid': uid})));
+    final res = await req.close().timeout(const Duration(seconds: 40));
+    final body = await res.transform(utf8.decoder).join();
+    if (res.statusCode == 200) return null;
+    if (res.statusCode == 404) return 'Kullanıcı silme servisi henüz kurulmamış (kurulum adımı yapılmalı).';
+    try {
+      final m = jsonDecode(body);
+      if (m is Map && m['error'] != null) return m['error'].toString();
+    } catch (_) {}
+    return 'Hata ${res.statusCode}';
+  } catch (e) {
+    return 'Bağlantı hatası: $e';
+  } finally {
+    client.close();
+  }
+}
+
+Future<void> adminDeleteUserDialog(BuildContext context, AppUser u) async {
+  if (u.uid == currentUser?.uid) {
+    toast('Kendi hesabınızı silemezsiniz.');
+    return;
+  }
+  final typed = await askText(context, '${u.name} kalıcı olarak silinsin mi?',
+      'Onay için SİL yazın', ok: 'Kalıcı sil', mustFill: true);
+  if (typed == null) return;
+  if (typed.trim().toUpperCase() != 'SİL' && typed.trim().toUpperCase() != 'SIL') {
+    toast('Silinmedi: onay için SİL yazılmalı.');
+    return;
+  }
+  toast('Kullanıcı siliniyor…');
+  final err = await adminDeleteUser(u.uid);
+  toast(err ?? '${u.name} kalıcı olarak silindi');
+}
+
 // Admin: bulut fonksiyonu ile kullanıcıya yeni şifre belirler. Hata yoksa null döner.
 Future<String?> adminSetPassword(String uid, String password) async {
   if (kIsWeb) return 'Web sürümünde yapılamıyor; web panelinden ya da telefondan sıfırlayın.';

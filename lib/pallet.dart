@@ -141,8 +141,13 @@ class Pallet {
   final String by;
   final DateTime? shippedAt; // yalnız siparişten ayrı giden paletlerde dolu
   final String shippedBy;
+  // Yükleme sayım işareti (sarı): sadece ekranda; hiçbir rapora, Excel'e, çeki listesine yansımaz
+  final bool loaded;
+  final DateTime? loadedAt;
+  final String loadedBy;
 
-  Pallet({required this.id, required this.no, required this.size, required this.gross, required this.net, required this.items, required this.by, this.shippedAt, this.shippedBy = ''});
+  Pallet({required this.id, required this.no, required this.size, required this.gross, required this.net, required this.items, required this.by, this.shippedAt, this.shippedBy = '',
+      this.loaded = false, this.loadedAt, this.loadedBy = ''});
 
   factory Pallet.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
     final m = d.data() ?? <String, dynamic>{};
@@ -156,10 +161,14 @@ class Pallet {
       by: (m['by'] ?? '').toString(),
       shippedAt: tsToDate(m['shippedAt']),
       shippedBy: (m['shippedBy'] ?? '').toString(),
+      loaded: m['loaded'] == true,
+      loadedAt: tsToDate(m['loadedAt']),
+      loadedBy: (m['loadedBy'] ?? '').toString(),
     );
   }
 
   bool get shipped => shippedAt != null;
+  bool get showLoaded => loaded && !shipped; // kırmızı (ayrı sevk) her zaman öncelikli
   // Çeki listesindeki sevk tarihi: ayrı gittiyse kendi tarihi, değilse sipariş sevk edildiyse siparişin tarihi
   DateTime? shipDate(PalletOrder o) => shippedAt ?? (o.isShipped ? o.shippedAt : null);
 
@@ -278,6 +287,13 @@ class PalletOps {
     });
     await recompute(o.id);
   }
+
+  // Yükleme sayımı: sarı işaret (raporlara yansımaz; recompute çağrılmaz)
+  static Future<void> setLoaded(PalletOrder o, Pallet p, bool on) => ref(o.id).collection('pallets').doc(p.id).update({
+        'loaded': on,
+        'loadedAt': on ? Timestamp.now() : null,
+        'loadedBy': on ? (currentUser?.name ?? '') : '',
+      });
 
   static Future<void> finish(PalletOrder o, String note) => ref(o.id)
       .update({'status': 'bitti', 'finishedAt': Timestamp.now(), 'finishNote': note, 'shippedAt': null, 'updatedAt': FieldValue.serverTimestamp()});
@@ -1070,24 +1086,54 @@ class PalletDetailPage extends StatelessWidget {
                   if (!ps.hasData) return const SizedBox.shrink();
                   final pallets = ps.data!.docs.map((d) => Pallet.fromDoc(d)).toList();
                   if (pallets.isEmpty) return _box(const Text('Henüz palet eklenmedi.', style: TextStyle(color: kMuted)));
+                  final canLoad = edit && !o.isShipped;
+                  final toLoad = pallets.where((p) => !p.shipped).toList();
+                  final loadedN = toLoad.where((p) => p.loaded).length;
+                  Future<void> toggleLoad(Pallet p) async {
+                    final on = !p.loaded;
+                    if (!await confirm(context, on ? 'Palet ${p.no} yüklendi mi?' : 'Palet ${p.no} yükleme işareti kalksın mı?',
+                        on ? 'Palet sarıya döner. Bu işaret sadece sayım içindir, hiçbir rapora yansımaz.' : 'Palet tekrar beyaz görünür.', on ? 'Tamam' : 'Kaldır')) {
+                      return;
+                    }
+                    try {
+                      await PalletOps.setLoaded(o, p, on);
+                    } catch (e) {
+                      toast('Hata: $e');
+                    }
+                  }
+
                   return Column(children: [
+                    if (canLoad && toLoad.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(color: const Color(0xFFFFF3BF), borderRadius: BorderRadius.circular(12), border: Border.all(color: const Color(0xFFF59F00))),
+                          child: Text('Yüklenen: $loadedN / ${toLoad.length} palet${loadedN == toLoad.length ? '  ✓ hepsi yüklendi' : ''}',
+                              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: Color(0xFF5C3B00))),
+                        ),
+                      ),
                     for (final p in pallets)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: InkWell(
                           borderRadius: BorderRadius.circular(12),
                           // palet içeriğini düzeltmek Girer / düzenler yetkisinde (sevk edilmemiş paletler); silme yalnız admin
+                          // bitmiş siparişte (yükleme zamanı) palete dokununca yükleme işareti sorulur
                           onTap: edit && !o.isFinished && !p.shipped
                               ? () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => PalletFormPage(order: o, existing: p)))
-                              : null,
+                              : (canLoad && o.isFinished && !p.shipped ? () => toggleLoad(p) : null),
                           child: Container(
                             width: double.infinity,
                             padding: const EdgeInsets.all(14),
                             decoration: BoxDecoration(
                               // ayrı sevk edilen palet komple kırmızı
-                              color: p.shipped ? const Color(0xFFC92A2A) : Colors.white,
+                              // yükleme işareti olan palet sarı
+                              color: p.shipped ? const Color(0xFFC92A2A) : (p.showLoaded ? const Color(0xFFFFD43B) : Colors.white),
                               borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: p.shipped ? const Color(0xFFC92A2A) : const Color(0xFFE3E6EA)),
+                              border: Border.all(
+                                  color: p.shipped ? const Color(0xFFC92A2A) : (p.showLoaded ? const Color(0xFFF59F00) : const Color(0xFFE3E6EA)), width: p.showLoaded ? 2 : 1),
                             ),
                             child: DefaultTextStyle.merge(
                               style: TextStyle(color: p.shipped ? Colors.white : null),
@@ -1096,6 +1142,9 @@ class PalletDetailPage extends StatelessWidget {
                                   Expanded(child: Text('Palet ${p.no}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
                                   Text(p.size, style: TextStyle(color: p.shipped ? Colors.white70 : kMuted)),
                                 ]),
+                                if (p.showLoaded)
+                                  Text('YÜKLENDİ · ${fmtDT(p.loadedAt)}${p.loadedBy.isEmpty ? '' : ' · ${p.loadedBy}'}',
+                                      style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF5C3B00))),
                                 if (p.shipped)
                                   Text('AYRI SEVK EDİLDİ · ${fmtFull(p.shippedAt)}${p.shippedBy.isEmpty ? '' : ' · ${p.shippedBy}'}',
                                       style: const TextStyle(fontWeight: FontWeight.w800, color: Colors.white)),
@@ -1105,6 +1154,16 @@ class PalletDetailPage extends StatelessWidget {
                                   Text('• ${it.productCode}: ${it.boxes} koli${it.perBox > 0 ? ' × ${it.perBox} = ${it.units} adet' : ''}'
                                       '${it.lot.isNotEmpty ? ' · Lot ${it.lot}' : ''}${it.skt.isNotEmpty ? ' · SKT ${it.skt}' : ''}'
                                       '${it.hasKg ? ' · ${fmtKg(it.gross)}/${fmtKg(it.net)} kg' : ''}'),
+                                if (canLoad && !p.shipped)
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: TextButton.icon(
+                                      style: TextButton.styleFrom(foregroundColor: const Color(0xFF5C3B00)),
+                                      onPressed: () => toggleLoad(p),
+                                      icon: Icon(p.loaded ? Icons.undo : Icons.check_circle_outline, size: 18),
+                                      label: Text(p.loaded ? 'Yükleme işaretini kaldır' : 'Yüklendi'),
+                                    ),
+                                  ),
                                 if (!o.isShipped && ((edit && !p.shipped) || (fix && p.shipped)))
                                   Align(
                                     alignment: Alignment.centerRight,

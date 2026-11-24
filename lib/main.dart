@@ -1168,9 +1168,15 @@ class _UserGateState extends State<UserGate> {
     _creating = true;
     await Future<void>.delayed(const Duration(seconds: 2));
     final ref = db.collection('users').doc(widget.user.uid);
-    final snap = await ref.get();
-    if (!snap.exists) {
-      await ref.set(newUserData(widget.user.email ?? '', widget.user.displayName ?? ''));
+    try {
+      final snap = await ref.get();
+      if (!snap.exists) {
+        await ref.set(newUserData(widget.user.email ?? '', widget.user.displayName ?? ''));
+      }
+    } catch (_) {
+      // Admin hesabı kalıcı sildiyse profil yeniden açılamaz: oturumu kapat
+      toast('Hesabınız silinmiş. Yöneticinizle görüşün.');
+      await signOut();
     }
   }
 
@@ -2678,6 +2684,12 @@ class UsersView extends StatelessWidget {
                           ),
                         ),
                         IconButton(onPressed: () => _rename(context, u), icon: const Icon(Icons.edit), tooltip: 'İsmi düzenle'),
+                        if ((currentUser?.isAdmin ?? false) && u.uid != currentUser?.uid)
+                          IconButton(
+                            onPressed: () => adminDeleteUserDialog(context, u),
+                            icon: const Icon(Icons.person_remove_outlined, color: Color(0xFFC92A2A)),
+                            tooltip: 'Kullanıcıyı kalıcı sil',
+                          ),
                       ],
                     ),
                     const SizedBox(height: 8),
