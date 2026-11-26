@@ -953,7 +953,8 @@ class PalletDetailPage extends StatelessWidget {
               _box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Row(children: [
                   Expanded(child: Text('Sipariş ${o.orderNo}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700))),
-                  if (fix && !o.isFinished)
+                  // Girer / Düzenler bitmemiş siparişi düzeltebilir; bitmiş / sevk edilmiş siparişi yalnız admin
+                  if ((edit && !o.isFinished) || fix)
                     IconButton(
                       tooltip: 'Düzenle',
                       icon: const Icon(Icons.edit),
