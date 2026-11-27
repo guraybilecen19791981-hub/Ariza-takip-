@@ -25,6 +25,7 @@ part 'account.dart';
 part 'notes.dart';
 part 'trash.dart';
 part 'fperf.dart';
+part 'approvals.dart';
 
 // ---------------------------------------------------------------------------
 // Ayarlar
@@ -89,7 +90,16 @@ const Map<String, String> kModules = {
   'uretim': 'Üretim makineleri',
   'tesis': 'Tesis ekipmanları',
   'teknik': 'Teknik hizmet',
+  'onay': 'Görsel onaylar',
   'rapor': 'Raporlar / Excel',
+};
+
+// Görsel onaylar varsayılan yetkileri: Görür = paneli görür; Girer = kendi rolüne istenen görselleri onaylar;
+// Yönetir = istenen rol fark etmeksizin tüm görselleri onaylar. Admin kişi bazında değiştirir.
+const Map<String, String> kOnayDefault = {
+  'admin': 'yonet',
+  'kalite': 'gir',
+  'ihracat': 'gir',
 };
 
 // Tesis ekipmanları varsayılan yetkileri (hat başlarındaki operatörler de arıza bildirebilsin)
@@ -134,6 +144,8 @@ class CustomRole {
     final p = <String, String>{for (final k in kModules.keys) k: 'yok'};
     final raw = x['perms'];
     if (raw is Map) raw.forEach((k, v) => p[k.toString()] = v.toString());
+    // eski özel roller: "onay veren" işaretliyse görsel onay yetkisi varsayılan Girer
+    if (!(raw is Map && raw.containsKey('onay'))) p['onay'] = x['approver'] == true ? 'gir' : 'yok';
     return CustomRole((x['key'] ?? '').toString(), (x['label'] ?? '').toString(), p, x['approver'] == true, x['packAlerts'] == true);
   }
 
@@ -253,7 +265,7 @@ Map<String, String> defaultPerms(String role) {
   final custom = gCustomRoles[role];
   if (custom != null) return Map<String, String>.from(custom.perms);
   Map<String, String> p(String a, String pk, String pl, String h, String r) =>
-      {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'uretim': h, 'tesis': kTesisDefault[role] ?? 'yok', 'teknik': kTechDefault[role] ?? 'yok', 'rapor': r};
+      {'ariza': a, 'paketleme': pk, 'paletleme': pl, 'hat': h, 'uretim': h, 'tesis': kTesisDefault[role] ?? 'yok', 'teknik': kTechDefault[role] ?? 'yok', 'onay': kOnayDefault[role] ?? 'yok', 'rapor': r};
   switch (role) {
     case 'admin':
       return p('yonet', 'yonet', 'yonet', 'yonet', 'yonet');
@@ -443,7 +455,7 @@ class AppUser {
   bool get isAdmin => role == 'admin';
   bool get getsAlarm => role == 'sef' || alarm;
   bool get getsPackAlerts =>
-      role == 'kalite' || role == 'vardiya' || role == 'admin' || role == 'ihracat' || role == 'planlama' || packAlertsFlag || approverFlag;
+      role == 'kalite' || role == 'vardiya' || role == 'admin' || role == 'ihracat' || role == 'planlama' || packAlertsFlag || approverFlag || can('onay', 'gir');
   bool get canManage => role == 'sef' || role == 'admin' || can('ariza', 'yonet');
   String get roleLabel => allRoleLabels()[role] ?? role;
 }
@@ -758,7 +770,7 @@ class Watchers {
   static final Set<String> _seen = <String>{};
 
   static Future<void> ensure(AppUser u) async {
-    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}|${u.perm('teknik')}|${u.perm('hat')}|${u.perm('uretim')}|${u.perm('tesis')}|${u.lines.join(',')}';
+    final key = '${u.uid}|${u.role}|${u.alarm}|${u.machineAlarm}|${u.approverFlag}|${u.packAlertsFlag}|${u.perm('teknik')}|${u.perm('hat')}|${u.perm('uretim')}|${u.perm('tesis')}|${u.perm('onay')}|${u.lines.join(',')}';
     if (key == _key) return;
     await stop();
     _key = key;
@@ -804,7 +816,7 @@ class Watchers {
           final type = (m['type'] ?? 'durus').toString();
           if (type == 'monay') {
             final targets = (m['targetRoles'] is List) ? (m['targetRoles'] as List).map((e) => e.toString()).toList() : <String>[];
-            if (!targets.contains(u.role) && !u.isAdmin) continue;
+            if (!canApprovePhoto(u, targets)) continue;
             Notifier.jobPhoto(
               (m['jobId'] ?? '').toString(),
               'Görsel onayı bekleniyor: ${m['machineName'] ?? ''}',
@@ -812,7 +824,7 @@ class Watchers {
             );
           } else if (type == 'onay') {
             final targets = (m['targetRoles'] is List) ? (m['targetRoles'] as List).map((e) => e.toString()).toList() : <String>[];
-            if (!targets.contains(u.role) && !u.isAdmin) continue;
+            if (!canApprovePhoto(u, targets)) continue;
             Notifier.packAlert(
               (m['orderId'] ?? '').toString(),
               'Görsel onayı bekleniyor',
@@ -1479,6 +1491,14 @@ class _HomePageState extends State<HomePage> {
     } else if (me.can('paletleme', 'gor')) {
       modules.add('paletleme');
     }
+    // Görsel onaylar: onay verenlerde ikinci sırada, sadece görenlerde sonda
+    if (me.can('onay', 'gor')) {
+      if (me.can('onay', 'gir') && modules.isNotEmpty) {
+        modules.insert(1, 'onay');
+      } else {
+        modules.add('onay');
+      }
+    }
     if (me.isAdmin && !kArizaPanel) modules.add('yonetim');
     if (modules.isEmpty) {
       return const SimpleMessagePage(
@@ -1503,6 +1523,7 @@ class _HomePageState extends State<HomePage> {
                     'tesis': Icons.settings_input_component_outlined,
                     'teknik': Icons.build_circle_outlined,
                     'paletleme': Icons.layers_outlined,
+                    'onay': Icons.fact_check_outlined,
                     'yonetim': Icons.manage_accounts_outlined,
                   }[m] ??
                   Icons.apps),
@@ -1514,6 +1535,7 @@ class _HomePageState extends State<HomePage> {
                     'tesis': 'Tesis',
                     'teknik': 'Arızalar',
                     'paletleme': 'Paletleme',
+                    'onay': 'Onaylar',
                     'yonetim': 'Yönetim',
                   }[m] ??
                   m,
@@ -1528,6 +1550,7 @@ class _HomePageState extends State<HomePage> {
     if (current == 'uretim') return MachineHome(key: const ValueKey('mh-uretim'), me: me, nav: nav, group: kUretim);
     if (current == 'tesis') return MachineHome(key: const ValueKey('mh-tesis'), me: me, nav: nav, group: kTesis);
     if (current == 'yonetim') return _adminScaffold(context, me, nav);
+    if (current == 'onay') return ApprovalsHome(me: me, nav: nav);
     if (current == 'teknik') return TechHome(me: me, nav: nav);
     return _arizaScaffold(context, me, nav);
   }

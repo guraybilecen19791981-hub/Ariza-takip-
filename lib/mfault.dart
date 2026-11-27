@@ -264,6 +264,7 @@ class MFaultOps {
 
   // Operatör arıza bildirir: makine arızalı olur, kayıt açılır, alarm gider
   static Future<String> report(LineMachine m, MReason r, String desc, List<Uint8List> photos, {bool noStop = false}) async {
+    if (m.hasFault) noStop = true; // makine zaten arızayla durduysa yeni arıza duruşsuz açılır (ilk arıza bağlantısı korunur)
     final now = DateTime.now();
     final ref = col.doc();
     final uid = currentUser?.uid ?? '';
@@ -319,7 +320,8 @@ class MFaultOps {
       // Makinenin durumu değişmez; arıza kaydı açılır ve teknik hizmete alarm gider
       final b = db.batch();
       writes(b);
-      b.update(MachineOps.col.doc(m.id), machineFields);
+      // Makinede birden çok duruşsuz arıza açık olabilir: listeye eklenir, durdurma arızasının yeri (faultId) boş kalır
+      b.update(MachineOps.col.doc(m.id), {'nsFaults': FieldValue.arrayUnion([ref.id])});
       b.set(db.collection('machineAlerts').doc(), {
         'group': m.group,
         'machineId': m.id,
@@ -362,6 +364,11 @@ class MFaultOps {
       'log': FieldValue.arrayUnion([_ev('${photos.length} fotoğraf eklendi')]),
     });
     await _savePhotos(f.id, photos, f.photoCount);
+  }
+
+  // Kapanan / iptal / silinen duruşsuz arıza makinedeki açık listesinden çıkar
+  static void _dropNs(WriteBatch b, LineMachine? m, MFault f) {
+    if (m != null && m.nsFaults.contains(f.id)) b.update(MachineOps.col.doc(m.id), {'nsFaults': FieldValue.arrayRemove([f.id])});
   }
 
   static Future<void> _machineFields(MFault f, Map<String, dynamic> data) async {
@@ -426,6 +433,7 @@ class MFaultOps {
     final b = db.batch();
     writes(b);
     if (m != null && m.faultId == f.id) b.update(MachineOps.col.doc(m.id), Map<String, dynamic>.from(clear));
+    _dropNs(b, m, f);
     await b.commit();
   }
 
@@ -469,6 +477,7 @@ class MFaultOps {
     if (m != null && m.faultId == f.id) {
       await MachineOps.col.doc(m.id).update({'faultId': '', 'faultStatus': '', 'faultAssignee': '', 'faultByUid': ''});
     }
+    if (m != null && m.nsFaults.contains(f.id)) await MachineOps.col.doc(m.id).update({'nsFaults': FieldValue.arrayRemove([f.id])});
   }
 
   // 2. teknisyen (yardımcı) ekler / kaldırır
@@ -612,6 +621,7 @@ class MFaultOps {
     final b = db.batch();
     writes(b);
     if (m != null && m.faultId == f.id) b.update(MachineOps.col.doc(m.id), Map<String, dynamic>.from(clear)); // duruşsuz: durum değişmez
+    _dropNs(b, m, f);
     await b.commit();
   }
 
@@ -695,7 +705,8 @@ Future<Uint8List?> pickPhotoBytes(BuildContext context) async {
 Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, String note, {bool noStop0 = false}) async {
   final desc = TextEditingController(text: note);
   final photos = <Uint8List>[];
-  var noStop = noStop0;
+  final forced = m.hasFault; // makine zaten arızayla duruyor: yeni arıza duruşsuz açılır
+  var noStop = noStop0 || forced;
   final ok = await showDialog<bool>(
     context: context,
     builder: (d) => StatefulBuilder(
@@ -737,9 +748,13 @@ Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, Str
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,
               value: noStop,
-              onChanged: (v) => setS(() => noStop = v == true),
+              onChanged: forced ? null : (v) => setS(() => noStop = v == true),
               title: const Text('Makine çalışmaya devam ediyor (duruşsuz arıza)'),
-              subtitle: const Text('Makinenin durumu değişmez; arıza teknik hizmete gider ve onların performansına sayılır.', style: TextStyle(fontSize: 12)),
+              subtitle: Text(
+                  forced
+                      ? 'Makinede açık bir arıza zaten var; bu arıza ayrı bir duruşsuz kayıt olarak açılır.'
+                      : 'Makinenin durumu değişmez; arıza teknik hizmete gider ve onların performansına sayılır. Bir makinede birden çok duruşsuz arıza açılabilir.',
+                  style: const TextStyle(fontSize: 12)),
             ),
             Text(
                 noStop
@@ -774,6 +789,43 @@ Future<void> reportFaultFlow(BuildContext context, LineMachine m, MReason r, Str
     toast(faultNeedsMgr(currentUser, m.grp) ? '${m.name}: arıza bildirildi, yönetici onayı bekleniyor' : '${m.name}: arıza bildirildi, teknik hizmete alarm gitti');
   } catch (e) {
     toast('Kaydedilemedi: $e');
+  }
+}
+
+// Bir makinenin açık arızaları (durduran + duruşsuzlar)
+class MachineFaultsPage extends StatelessWidget {
+  final LineMachine machine;
+  const MachineFaultsPage({super.key, required this.machine});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('${machine.name} · açık arızalar')),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: MFaultOps.col.where('machineId', isEqualTo: machine.id).snapshots(),
+        builder: (context, snap) {
+          if (snap.hasError) return Center(child: Text('Hata: ${snap.error}'));
+          if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+          final list = snap.data!.docs.map((d) => MFault.fromDoc(d)).where((f) => f.open).toList()
+            ..sort((a, b) => (b.createdAt ?? DateTime(2000)).compareTo(a.createdAt ?? DateTime(2000)));
+          if (list.isEmpty) return const Center(child: Text('Açık arıza yok.', style: TextStyle(color: kMuted)));
+          return ListView(padding: const EdgeInsets.all(12), children: [
+            for (final f in list)
+              Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MFaultDetailPage(faultId: f.id))),
+                  leading: Icon(Icons.build_circle, color: mFaultColor(f.status)),
+                  title: Text(f.desc, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  subtitle: Text('${f.code} · ${f.noStop ? 'Duruşsuz' : 'Makineyi durdurdu'} · ${kMFaultStatus[f.status] ?? f.status}'
+                      '${f.assigneeName.isEmpty ? '' : ' · ${f.assigneeName}'} · ${fmtDT(f.createdAt)}'),
+                  trailing: const Icon(Icons.chevron_right),
+                ),
+              ),
+          ]);
+        },
+      ),
+    );
   }
 }
 

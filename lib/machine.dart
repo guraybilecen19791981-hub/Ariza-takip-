@@ -243,7 +243,8 @@ class LineMachine {
   final double jobFuAdet;
   final double jobFuKg;
   final int operators;
-  final String faultId; // açık arıza kaydı
+  final String faultId; // açık arıza kaydı (makineyi durduran)
+  final List<String> nsFaults; // açık duruşsuz arızalar (makine çalışırken birden çok olabilir)
   final String faultStatus;
   final String faultAssignee;
   final String faultByUid; // arızayı açan (onay verecek kişi)
@@ -280,6 +281,7 @@ class LineMachine {
     this.jobFuKg = 0,
     this.operators = 0,
     this.faultId = '',
+    this.nsFaults = const <String>[],
     this.faultStatus = '',
     this.faultAssignee = '',
     this.faultByUid = '',
@@ -320,6 +322,7 @@ class LineMachine {
       jobFuKg: _dbl(m['jobFuKg']),
       operators: _int(m['operators']),
       faultId: (m['faultId'] ?? '').toString(),
+      nsFaults: m['nsFaults'] is List ? (m['nsFaults'] as List).map((e) => e.toString()).toList() : const <String>[],
       faultStatus: (m['faultStatus'] ?? '').toString(),
       faultAssignee: (m['faultAssignee'] ?? '').toString(),
       faultByUid: (m['faultByUid'] ?? '').toString(),
@@ -334,6 +337,8 @@ class LineMachine {
   bool get hasTarget => !tesis && target > 0;
   String get targetText => hasTarget ? '${fmtQty(target)} ${targetUnit == 'kg' ? 'kg' : 'adet'} / vardiya' : '';
   bool get hasFault => faultId.isNotEmpty;
+  bool get hasNsFault => nsFaults.isNotEmpty;
+  int get openFaultCount => (hasFault ? 1 : 0) + nsFaults.length;
   String get peopleText => grp.peopleText(workers, daily, operators);
   String get jobFireText => fireText(jobFpAdet, jobFpKg, jobFuAdet, jobFuKg);
   bool get hasJob => jobId.isNotEmpty;
@@ -1400,7 +1405,7 @@ const Map<String, String> kLiveFilters = {'tumu': 'Tümü', 'ariza': 'Arızalı'
 bool liveFilterOk(String f, LineMachine m) {
   switch (f) {
     case 'ariza':
-      return m.hasFault || m.state == 'ariza' || m.state == kFaultWaitKey;
+      return m.hasFault || m.hasNsFault || m.state == 'ariza' || m.state == kFaultWaitKey;
     case 'durus':
       return !m.running && !m.off;
     case 'calisan':
@@ -1599,7 +1604,7 @@ class _MachineCard extends StatelessWidget {
     final c = mStateColor(m.state);
     final st = stat;
     final enter = canMachineEnter(currentUser, m.grp);
-    final tech = m.hasFault && canTechSee(currentUser);
+    final tech = (m.hasFault || m.hasNsFault) && canTechSee(currentUser);
     final te = st == null ? null : targetEff(m.target, m.targetUnit, st.tracked, shiftSec, st.qtyAdet, st.qtyKg);
     final mainLabel = m.tesis
         ? (m.hasFault ? 'Arıza detayı' : 'Arıza bildir')
@@ -1614,7 +1619,10 @@ class _MachineCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         onTap: enter
             ? () => showMachineSheet(context, m, reasons)
-            : (tech ? () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MFaultDetailPage(faultId: m.faultId))) : null),
+            : (tech
+                ? () => Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) => m.hasFault && !m.hasNsFault ? MFaultDetailPage(faultId: m.faultId) : MachineFaultsPage(machine: m)))
+                : null),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1654,6 +1662,23 @@ class _MachineCard extends StatelessWidget {
                         style: const TextStyle(color: Color(0xFFC92A2A), fontWeight: FontWeight.w700, fontSize: 13)),
                   ),
                 ]),
+              ),
+            if (m.hasNsFault)
+              InkWell(
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MachineFaultsPage(machine: m))),
+                child: Container(
+                  margin: const EdgeInsets.only(top: 5),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(color: const Color(0xFFE7F0FF), borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xFFB4CCF5))),
+                  child: Row(children: [
+                    const Icon(Icons.build_circle_outlined, color: Color(0xFF1D4ED8), size: 16),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text('${m.nsFaults.length} duruşsuz arıza açık (makine çalışıyor)',
+                          style: const TextStyle(color: Color(0xFF1D4ED8), fontWeight: FontWeight.w700, fontSize: 13)),
+                    ),
+                  ]),
+                ),
               ),
             const SizedBox(height: 5),
             if (m.tesis)
@@ -1766,13 +1791,24 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
                 ]),
               ),
             ],
-            if (!m.hasFault && !m.off) ...[
+            if (m.hasNsFault) ...[
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFF1D4ED8), minimumSize: const Size.fromHeight(44)),
+                onPressed: () => Navigator.pop(c, 'f_liste'),
+                icon: const Icon(Icons.list_alt, size: 18),
+                label: Text('Açık duruşsuz arızalar (${m.nsFaults.length})', style: const TextStyle(fontWeight: FontWeight.w700)),
+              ),
+            ],
+            // Duruşsuz arıza her zaman bildirilebilir: bir makinede farklı yerlerde birden çok arıza olabilir
+            if (!m.off) ...[
               const SizedBox(height: 10),
               OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFC92A2A), side: const BorderSide(color: Color(0xFFC92A2A)), minimumSize: const Size.fromHeight(46)),
                 onPressed: () => Navigator.pop(c, 'f_durussuz'),
                 icon: const Icon(Icons.build_circle_outlined),
-                label: const Text('Arıza bildir (makine çalışıyor)', style: TextStyle(fontWeight: FontWeight.w700)),
+                label: Text(m.hasNsFault || m.hasFault ? 'Yeni duruşsuz arıza bildir (makine çalışıyor)' : 'Arıza bildir (makine çalışıyor)',
+                    style: const TextStyle(fontWeight: FontWeight.w700)),
               ),
             ],
             if (!m.tesis) ...[
@@ -1897,6 +1933,11 @@ Future<void> showMachineSheet(BuildContext context, LineMachine m, List<MReason>
     case 'f_detay':
       {
         await Navigator.of(context).push(MaterialPageRoute(builder: (_) => MFaultDetailPage(faultId: m.faultId)));
+        return;
+      }
+    case 'f_liste':
+      {
+        await Navigator.of(context).push(MaterialPageRoute(builder: (_) => MachineFaultsPage(machine: m)));
         return;
       }
     case 'f_onay':
@@ -3377,7 +3418,7 @@ class JobPhotoOps {
     });
     b.update(MachineOps.jobs.doc(jobId), {
       'pendingApprovals': FieldValue.increment(-1),
-      'approvalLog': FieldValue.arrayUnion(['${fmtFull(now)} ${approverRoles()[role] ?? role} ($who): ${approve ? 'Onaylandı' : 'Reddedildi'}${note.isEmpty ? '' : ' - $note'}']),
+      'approvalLog': FieldValue.arrayUnion(['${fmtFull(now)} ${approverLabel(role)} ($who): ${approve ? 'Onaylandı' : 'Reddedildi'}${note.isEmpty ? '' : ' - $note'}']),
     });
     try {
       final md = await MachineOps.col.doc(mid).get();
@@ -3534,7 +3575,7 @@ class _JobPhotosPageState extends State<JobPhotosPage> {
                               'reddedildi' => ('Reddedildi', const Color(0xFFC92A2A)),
                               _ => ('Bilgi amaçlı', kMuted),
                             };
-                            final myRoles = me == null || st != 'bekliyor' ? <String>[] : approvers.where((r) => me.role == r || me.isAdmin).toList();
+                            final myRoles = me == null || st != 'bekliyor' || !canApprovePhoto(me, approvers) ? <String>[] : [approveRoleFor(me, approvers)];
                             return Card(
                               margin: EdgeInsets.zero,
                               child: Padding(
@@ -3552,7 +3593,7 @@ class _JobPhotosPageState extends State<JobPhotosPage> {
                                       Text('${m['by'] ?? ''} · ${fmtDT(tsToDate(m['t']))}', style: const TextStyle(color: kMuted, fontSize: 12)),
                                       if (note.isNotEmpty) Text(note, style: const TextStyle(fontSize: 13)),
                                       if (dec != null)
-                                        Text('${approverRoles()[dec['role']] ?? dec['role'] ?? ''} · ${dec['by'] ?? ''} · ${fmtDT(tsToDate(dec['t']))}${(dec['note'] ?? '').toString().isEmpty ? '' : ' · ${dec['note']}'}',
+                                        Text('${approverLabel((dec['role'] ?? '').toString())} · ${dec['by'] ?? ''} · ${fmtDT(tsToDate(dec['t']))}${(dec['note'] ?? '').toString().isEmpty ? '' : ' · ${dec['note']}'}',
                                             style: TextStyle(color: color, fontSize: 12)),
                                       if (myRoles.isNotEmpty)
                                         Wrap(spacing: 6, children: [
@@ -3604,6 +3645,26 @@ class _BulkRow {
 
 double _num(String s) => double.tryParse(s.trim().replaceAll(' ', '').replaceAll(',', '.')) ?? 0;
 
+// Gün sonu girişinin kayıt anı: seçilen günün seçilen vardiyasının ortası (vardiya raporuna o vardiyada sayılır).
+// Vardiya şu an sürüyorsa şimdiki an; henüz başlamadıysa başlangıcı.
+DateTime bulkEntryTime(DateTime day, MShift sh) {
+  final w = _winFor(dayStart(day), sh);
+  final now = DateTime.now();
+  final mid = w.s.add(Duration(seconds: w.e.difference(w.s).inSeconds ~/ 2));
+  if (!mid.isAfter(now)) return mid;
+  return now.isAfter(w.s) ? now : w.s;
+}
+
+// Seçilen gün için varsayılan vardiya: bugünse içinde bulunulan vardiya, değilse ilki
+int defaultShiftIndex(DateTime day, List<MShift> l) {
+  final now = DateTime.now();
+  for (var i = 0; i < l.length; i++) {
+    final w = _winFor(dayStart(day), l[i]);
+    if (w.contains(now)) return i;
+  }
+  return 0;
+}
+
 class BulkProductionPage extends StatefulWidget {
   final MGroup group;
   const BulkProductionPage({super.key, required this.group});
@@ -3616,9 +3677,27 @@ class _BulkProductionPageState extends State<BulkProductionPage> {
   final List<_BulkRow> _rows = [_BulkRow()];
   bool _busy = false;
   late final Stream<List<LineMachine>> _ms = MachineOps.machinesStream(widget.group);
+  List<MShift> _shifts = List<MShift>.from(kDefaultShifts);
+  int _shift = -1; // -1: henüz seçilmedi (varsayılan hesaplanır)
+  StreamSubscription<List<MShift>>? _shSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _shSub = MachineOps.shiftsStream().listen((l) {
+      if (!mounted) return;
+      setState(() {
+        _shifts = l.isEmpty ? List<MShift>.from(kDefaultShifts) : l;
+        if (_shift < 0 || _shift >= _shifts.length) _shift = defaultShiftIndex(_day, _shifts);
+      });
+    });
+  }
+
+  MShift get _sh => _shifts[(_shift < 0 || _shift >= _shifts.length) ? 0 : _shift];
 
   @override
   void dispose() {
+    _shSub?.cancel();
     for (final r in _rows) {
       r.dispose();
     }
@@ -3640,11 +3719,14 @@ class _BulkProductionPageState extends State<BulkProductionPage> {
       toast('Kaydedilecek satır yok (makine ve miktar / fire girin).');
       return;
     }
-    if (!await confirm(context, 'Gün sonu girişi kaydedilsin mi?', '${fmtDay(_day)} tarihine ${rows.length} satır üretim / fire girişi yazılacak.', 'Kaydet')) return;
+    final sh = _sh;
+    if (!await confirm(context, 'Gün sonu girişi kaydedilsin mi?',
+        '${fmtDay(_day)} · ${sh.label} vardiyasına ${rows.length} satır üretim / fire girişi yazılacak.', 'Kaydet')) {
+      return;
+    }
     setState(() => _busy = true);
     try {
-      final now = DateTime.now();
-      final t = dayStart(now) == _day ? now : DateTime(_day.year, _day.month, _day.day, 17);
+      final t = bulkEntryTime(_day, sh);
       var b = db.batch();
       var n = 0;
       final mInc = <String, Map<String, double>>{};
@@ -3675,7 +3757,8 @@ class _BulkProductionPageState extends State<BulkProductionPage> {
           'tMs': t.millisecondsSinceEpoch,
           'by': currentUser?.name ?? '',
           'byUid': currentUser?.uid ?? '',
-          'text': 'Gün sonu girişi',
+          'text': 'Gün sonu girişi · ${sh.label}',
+          'shift': sh.label,
           'fp': 0,
           'fpUnit': 'adet',
           'fu': fire,
@@ -3746,13 +3829,26 @@ class _BulkProductionPageState extends State<BulkProductionPage> {
             OutlinedButton.icon(
               onPressed: () async {
                 final d = await showDatePicker(context: context, initialDate: _day, firstDate: DateTime(2024), lastDate: DateTime.now());
-                if (d != null) setState(() => _day = dayStart(d));
+                if (d != null) {
+                  setState(() {
+                    _day = dayStart(d);
+                    _shift = defaultShiftIndex(_day, _shifts);
+                  });
+                }
               },
               icon: const Icon(Icons.calendar_today, size: 18),
               label: Text('Tarih: ${fmtDay(_day)}'),
             ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<int>(
+              value: (_shift < 0 || _shift >= _shifts.length) ? 0 : _shift,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Vardiya', isDense: true, prefixIcon: Icon(Icons.schedule, size: 18)),
+              items: [for (var i = 0; i < _shifts.length; i++) DropdownMenuItem(value: i, child: Text(_shifts[i].label))],
+              onChanged: (v) => setState(() => _shift = v ?? 0),
+            ),
             const SizedBox(height: 4),
-            const Text('Her satır seçilen makinenin üretimine kaydedilir. Sipariş no makinede açık olan siparişle aynıysa siparişin toplamına da eklenir.',
+            const Text('Her satır seçilen makinenin üretimine, seçilen vardiyaya kaydedilir ve vardiya raporunda o vardiyada görünür. Sipariş no makinede açık olan siparişle aynıysa siparişin toplamına da eklenir.',
                 style: TextStyle(color: kMuted, fontSize: 12)),
             const SizedBox(height: 8),
             for (var i = 0; i < _rows.length; i++)

@@ -725,7 +725,18 @@ bool canEditPack(PackOrder o) {
   return me.uid == o.ownerUid && me.can('paketleme', 'gir');
 }
 
-bool isApprover(AppUser me) => me.isAdmin || approverRoles().containsKey(me.role) || me.approverFlag;
+// Görsel onay yetkisi admin tarafından dağıtılır (Kullanıcılar → "Görsel onaylar"):
+// Girer: kendi rolüne istenen görselleri onaylar · Yönetir: tüm görselleri onaylar
+bool isApprover(AppUser me) => me.isAdmin || me.can('onay', 'gir');
+bool canApprovePhoto(AppUser? me, List<String> approvers) {
+  if (me == null) return false;
+  if (me.isAdmin || me.can('onay', 'yonet')) return true;
+  return me.can('onay', 'gir') && approvers.contains(me.role);
+}
+
+// Kararda kaydedilecek rol: istenen roller arasındaysa kendi rolü, değilse (Yönetir) kendi rolü yine yazılır
+String approveRoleFor(AppUser me, List<String> approvers) => approvers.contains(me.role) ? me.role : (approvers.isNotEmpty && me.isAdmin ? approvers.first : me.role);
+String approverLabel(String r) => approverRoles()[r] ?? allRoleLabels()[r] ?? r;
 
 // ---------------------------------------------------------------------------
 // Ana ekran (paketleme)
@@ -1862,7 +1873,7 @@ class PackPhotos extends StatelessWidget {
                                           : (p.roleStatus(r) == 'red' ? const Color(0xFFC92A2A) : const Color(0xFF6B4F00)),
                                       fontWeight: FontWeight.w600,
                                     )),
-                                if (me != null && (me.role == r || me.isAdmin) && p.status == 'bekliyor')
+                                if (me != null && canApprovePhoto(me, p.approvers) && (me.role == r || ((me.isAdmin || me.can('onay', 'yonet')) && r == p.approvers.first)) && p.status == 'bekliyor')
                                   Wrap(spacing: 6, children: [
                                     OutlinedButton(
                                       onPressed: () async {
